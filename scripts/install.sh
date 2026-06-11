@@ -132,43 +132,72 @@ collect_config() {
 
 # ── Proxmox VE 9 ───────────────────────────────────────────
 install_proxmox() {
-    step "Installing Proxmox VE 9"
+    step "Installing Proxmox VE 9 on Debian 13 (Trixie)"
 
     info "Setting hostname to ${PVE_HOSTNAME}..."
     hostnamectl set-hostname "${PVE_HOSTNAME}"
-    echo "127.0.0.1   localhost" > /etc/hosts
-    echo "${COCO_IP}   ${PVE_HOSTNAME}.local ${PVE_HOSTNAME}" >> /etc/hosts
-    success "Hostname set"
+    cat > /etc/hosts << HOSTSEOF
+127.0.0.1       localhost
+${COCO_IP}      ${PVE_HOSTNAME}.local ${PVE_HOSTNAME}
 
-    info "Adding Proxmox VE repository..."
-    echo "deb [arch=amd64] http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
-        > /etc/apt/sources.list.d/pve-install-repo.list
-    wget -q -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg \
-        http://download.proxmox.com/debian/proxmox-release-bookworm.gpg
-    success "Repository added"
+::1             localhost ip6-localhost ip6-loopback
+ff02::1         ip6-allnodes
+ff02::2         ip6-allrouters
+HOSTSEOF
+    success "Hostname set — $(hostname --ip-address)"
 
-    info "Updating package index..."
+    info "Cleaning existing apt sources..."
+    rm -f /etc/apt/sources.list.d/pve-install-repo.list
+    rm -f /etc/apt/sources.list.d/pve-install-repo.sources
+    rm -f /etc/apt/sources.list.d/pve-enterprise.list
+    rm -f /etc/apt/sources.list.d/ceph.list
+    rm -f /etc/apt/trusted.gpg.d/proxmox-*.gpg
+    success "Old sources cleaned"
+
+    info "Adding Proxmox VE repository (Trixie)..."
+    cat > /etc/apt/sources.list.d/pve-install-repo.sources << REPOEOF
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+REPOEOF
+    success "Repository configured"
+
+    info "Downloading Proxmox GPG key (Trixie)..."
+    wget -q https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
+        -O /usr/share/keyrings/proxmox-archive-keyring.gpg
+    success "GPG key installed"
+
+    info "Updating package index and upgrading base system..."
     apt-get update -qq >> "$LOG_FILE" 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y -qq >> "$LOG_FILE" 2>&1
+    success "Base system up to date"
 
-    info "Installing Proxmox VE (this takes a few minutes)..."
+    info "Installing Proxmox VE kernel (reboot required after)..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-default-kernel \
+        >> "$LOG_FILE" 2>&1
+    success "Proxmox kernel installed"
+
+    info "Installing Proxmox VE packages (this takes a few minutes)..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         proxmox-ve postfix open-iscsi chrony \
         >> "$LOG_FILE" 2>&1
     success "Proxmox VE installed"
 
-    info "Setting Proxmox root password..."
+    info "Setting root password..."
     echo "root:${PVE_ROOT_PASSWORD}" | chpasswd
     success "Root password set"
 
-    info "Removing default kernel..."
-    apt-get remove -y linux-image-amd64 'linux-image-6.*' >> "$LOG_FILE" 2>&1 || true
+    info "Removing Debian default kernel..."
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y \
+        linux-image-amd64 'linux-image-6.12*' >> "$LOG_FILE" 2>&1 || true
     update-grub >> "$LOG_FILE" 2>&1
-    success "Default kernel removed — Proxmox kernel active"
+    success "Debian kernel removed — Proxmox kernel active"
 
-    info "Removing enterprise repository (using no-subscription)..."
-    rm -f /etc/apt/sources.list.d/pve-enterprise.list
-    rm -f /etc/apt/sources.list.d/ceph.list
-    success "Enterprise repo removed"
+    info "Removing os-prober (can cause issues with VM disks in GRUB)..."
+    apt-get remove -y os-prober >> "$LOG_FILE" 2>&1 || true
+    success "os-prober removed"
 }
 
 # ── KVM / libvirt ──────────────────────────────────────────

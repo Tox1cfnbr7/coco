@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.3.0
-#   Target: Debian 13 (Trixie)
+#   Installer v0.4.0
+#   Target: Debian 13 (Trixie) + Proxmox VE 9
+#   No Docker — runs natively on the hypervisor
 # ============================================================
 
-COCO_VERSION="0.3.0"
+set -euo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+COCO_VERSION="0.4.0"
 COCO_DIR="/opt/coco"
 LOG_FILE="/var/log/coco-install.log"
-
-# Ensure sbin is in PATH (Debian 13 may not include it by default)
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+STATE_FILE="/var/lib/coco-install.state"
+COCO_SERVICE="/etc/systemd/system/coco-install-resume.service"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -30,6 +31,12 @@ error()   { echo -e "${RED}  [-] $*${RESET}"; log "ERR:  $*"; exit 1; }
 step()    { echo ""; echo -e "  ${BOLD}${CYAN}>> $*${RESET}"; echo ""; }
 divider() { echo -e "  ${DIM}────────────────────────────────────────────────${RESET}"; }
 
+# ── State management ───────────────────────────────────────
+save_state() { echo "$1" > "$STATE_FILE"; log "STATE: $1"; }
+get_state()  { [[ -f "$STATE_FILE" ]] && cat "$STATE_FILE" || echo "start"; }
+done_state() { local s; s=$(get_state); [[ "$s" == "$1" || "$s" > "$1" ]]; }
+
+# ── Logo ───────────────────────────────────────────────────
 print_logo() {
     clear
     echo -e "${CYAN}"
@@ -43,113 +50,128 @@ print_logo() {
          Attack & Defense Platform
 LOGO
     echo -e "${RESET}"
-    echo -e "  ${BOLD}Version${RESET}  ${COCO_VERSION}  |  ${BOLD}Target${RESET}  Debian 13  |  ${BOLD}Log${RESET}  ${LOG_FILE}"
+    echo -e "  ${BOLD}Version${RESET}  ${COCO_VERSION}  |  ${BOLD}Target${RESET}  Debian 13 + Proxmox VE 9"
+    echo -e "  ${BOLD}Log${RESET}      ${LOG_FILE}"
     divider
     echo ""
 }
 
-# ── Preflight ──────────────────────────────────────────────
+# ── Checks ─────────────────────────────────────────────────
 check_root() {
     [[ $EUID -eq 0 ]] || error "Run as root: sudo bash install.sh"
 }
 
 check_os() {
     step "System check"
-    [[ -f /etc/debian_version ]] || error "Requires Debian 13. Detected: $(uname -s)"
+    [[ -f /etc/debian_version ]] || error "Requires Debian 13."
     success "OS: Debian $(cat /etc/debian_version)"
 
     local ram_gb
     ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
-    [[ $ram_gb -lt 8 ]] && warn "RAM: ${ram_gb} GB — recommended 16+ GB" || success "RAM: ${ram_gb} GB"
+    [[ $ram_gb -lt 8 ]] && warn "RAM: ${ram_gb} GB — recommended 16+ GB" \
+        || success "RAM: ${ram_gb} GB"
 
     local disk_gb
     disk_gb=$(df / --output=avail -BG | tail -1 | tr -d 'G ')
-    [[ $disk_gb -lt 50 ]] && error "Disk: only ${disk_gb} GB free — need 50+ GB" || success "Disk: ${disk_gb} GB free"
+    [[ $disk_gb -lt 50 ]] && error "Disk: only ${disk_gb} GB free — need 50+ GB" \
+        || success "Disk: ${disk_gb} GB free"
 
     if grep -qE 'vmx|svm' /proc/cpuinfo; then
         success "CPU: Nested virtualization flags present (vmx/svm)"
     else
-        warn "CPU: No vmx/svm flags — make sure Proxmox CPU type is set to 'host'"
+        warn "CPU: No vmx/svm flags — set Proxmox CPU type to 'host'"
     fi
-}
-
-# ── Bootstrap dependencies ─────────────────────────────────
-install_bootstrap() {
-    step "Installing bootstrap dependencies"
-    info "Updating package index..."
-    apt-get update -qq >> "$LOG_FILE" 2>&1
-
-    info "Installing required tools..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        curl wget git vim unzip jq openssl \
-        ca-certificates gnupg lsb-release \
-        python3 python3-pip python3-venv \
-        procps iproute2 \
-        >> "$LOG_FILE" 2>&1
-    success "Bootstrap dependencies installed"
 }
 
 # ── Config ─────────────────────────────────────────────────
 collect_config() {
     step "Configuration"
-    echo -e "  ${DIM}Press Enter to accept the default value shown in brackets.${RESET}"
+    echo -e "  ${DIM}Press Enter to accept defaults.${RESET}"
     echo ""
 
     local detected_ip
     detected_ip=$(hostname -I | awk '{print $1}')
-
-    read -rp "  $(echo -e "${BOLD}COCO VM IP address${RESET}") [${detected_ip}]: " COCO_IP
-    COCO_IP=${COCO_IP:-$detected_ip}
-
-    read -rp "  $(echo -e "${BOLD}COCO Web-GUI port${RESET}") [8080]: " COCO_PORT
-    COCO_PORT=${COCO_PORT:-8080}
-
     local detected_hostname
     detected_hostname=$(hostname)
 
-    echo ""
+    read -rp "  $(echo -e "${BOLD}COCO VM IP${RESET}") [${detected_ip}]: " COCO_IP
+    COCO_IP=${COCO_IP:-$detected_ip}
+
     read -rp "  $(echo -e "${BOLD}Proxmox hostname${RESET}") [${detected_hostname}]: " PVE_HOSTNAME
     PVE_HOSTNAME=${PVE_HOSTNAME:-$detected_hostname}
 
-    read -rsp "  $(echo -e "${BOLD}Proxmox root password${RESET}"): " PVE_ROOT_PASSWORD
+    read -rsp "  $(echo -e "${BOLD}Root password (for Proxmox GUI login)${RESET}"): " PVE_ROOT_PASSWORD
     echo ""
     read -rsp "  $(echo -e "${BOLD}Confirm password${RESET}"): " PVE_ROOT_PASSWORD_CONFIRM
     echo ""
 
-    [[ "$PVE_ROOT_PASSWORD" == "$PVE_ROOT_PASSWORD_CONFIRM" ]] || error "Passwords do not match."
-    [[ ${#PVE_ROOT_PASSWORD} -ge 8 ]] || error "Password must be at least 8 characters."
+    [[ "$PVE_ROOT_PASSWORD" == "$PVE_ROOT_PASSWORD_CONFIRM" ]] \
+        || error "Passwords do not match."
+    [[ ${#PVE_ROOT_PASSWORD} -ge 8 ]] \
+        || error "Password must be at least 8 characters."
 
     SECRET_KEY=$(openssl rand -hex 32)
 
     echo ""
     step "Summary"
     divider
-    echo -e "  COCO Web-GUI     :  ${CYAN}http://${COCO_IP}:${COCO_PORT}${RESET}"
-    echo -e "  Guacamole        :  ${CYAN}http://${COCO_IP}:8443${RESET}"
-    echo -e "  Proxmox hostname :  ${PVE_HOSTNAME}"
-    echo -e "  Proxmox GUI      :  ${CYAN}https://${COCO_IP}:8006${RESET}"
-    echo -e "  Install dir      :  ${COCO_DIR}"
+    echo -e "  Proxmox GUI  :  ${CYAN}https://${COCO_IP}:8006${RESET}"
+    echo -e "  COCO Web-GUI :  ${CYAN}https://${COCO_IP}:443${RESET}"
+    echo -e "  Hostname     :  ${PVE_HOSTNAME}"
+    echo -e "  Install dir  :  ${COCO_DIR}"
     divider
     echo ""
     read -rp "  Proceed with installation? [y/N]: " confirm
     [[ "${confirm,,}" == "y" ]] || error "Installation cancelled."
+
+    # Save config for post-reboot resume
+    mkdir -p "${COCO_DIR}"
+    cat > "${COCO_DIR}/.install-config" << CFGEOF
+COCO_IP="${COCO_IP}"
+PVE_HOSTNAME="${PVE_HOSTNAME}"
+PVE_ROOT_PASSWORD="${PVE_ROOT_PASSWORD}"
+SECRET_KEY="${SECRET_KEY}"
+CFGEOF
+    chmod 600 "${COCO_DIR}/.install-config"
 }
 
-# ── Proxmox VE 9 ───────────────────────────────────────────
+load_config() {
+    [[ -f "${COCO_DIR}/.install-config" ]] \
+        || error "Config file not found. Run install.sh from scratch."
+    source "${COCO_DIR}/.install-config"
+}
+
+# ── Bootstrap ──────────────────────────────────────────────
+install_bootstrap() {
+    done_state "bootstrap" && { success "Bootstrap: already done"; return; }
+    step "Installing bootstrap dependencies"
+
+    apt-get update -qq >> "$LOG_FILE" 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        curl wget git vim unzip jq openssl \
+        ca-certificates gnupg lsb-release \
+        procps iproute2 net-tools \
+        python3 python3-pip python3-venv \
+        >> "$LOG_FILE" 2>&1
+    success "Bootstrap dependencies installed"
+    save_state "bootstrap"
+}
+
+# ── Proxmox VE ─────────────────────────────────────────────
 install_proxmox() {
-    step "Installing Proxmox VE 9 on Debian 13 (Trixie)"
+    done_state "proxmox" && { success "Proxmox VE: already installed"; return; }
+    step "Installing Proxmox VE 9"
 
     info "Setting hostname to ${PVE_HOSTNAME}..."
     hostnamectl set-hostname "${PVE_HOSTNAME}"
     cat > /etc/hosts << HOSTSEOF
 127.0.0.1       localhost
 ${COCO_IP}      ${PVE_HOSTNAME}.local ${PVE_HOSTNAME}
-
 ::1             localhost ip6-localhost ip6-loopback
 ff02::1         ip6-allnodes
 ff02::2         ip6-allrouters
 HOSTSEOF
-    success "Hostname set — $(hostname --ip-address)"
+    success "Hostname set"
 
     info "Cleaning existing apt sources..."
     rm -f /etc/apt/sources.list.d/pve-install-repo.list
@@ -167,7 +189,7 @@ HOSTSEOF
         >> "$LOG_FILE" 2>&1
     success "GPG key installed"
 
-    info "Adding Proxmox VE repository (Trixie, no-subscription)..."
+    info "Adding Proxmox VE repository..."
     cat > /etc/apt/sources.list.d/pve-install-repo.sources << REPOEOF
 Types: deb
 URIs: http://download.proxmox.com/debian/pve
@@ -177,24 +199,25 @@ Signed-By: /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
 REPOEOF
     success "Repository configured"
 
-    info "Updating package index and upgrading base system..."
+    info "Updating system..."
     apt-get update -qq >> "$LOG_FILE" 2>&1
     DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y -qq >> "$LOG_FILE" 2>&1
-    success "Base system up to date"
+    success "System up to date"
 
     info "Installing Proxmox VE kernel..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-default-kernel \
         >> "$LOG_FILE" 2>&1
     success "Proxmox kernel installed"
 
-    info "Installing Proxmox VE packages (this takes a few minutes)..."
+    info "Installing Proxmox VE packages..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         proxmox-ve postfix open-iscsi chrony \
         >> "$LOG_FILE" 2>&1
     success "Proxmox VE installed"
 
     info "Setting root password..."
-    echo -e "${PVE_ROOT_PASSWORD}\n${PVE_ROOT_PASSWORD}" | passwd root >> "$LOG_FILE" 2>&1
+    echo -e "${PVE_ROOT_PASSWORD}\n${PVE_ROOT_PASSWORD}" | passwd root \
+        >> "$LOG_FILE" 2>&1
     success "Root password set"
 
     info "Removing Debian default kernel..."
@@ -202,170 +225,298 @@ REPOEOF
         linux-image-amd64 'linux-image-6.12*' >> "$LOG_FILE" 2>&1 || true
     success "Debian kernel removed"
 
-    info "Updating GRUB configuration..."
+    info "Updating GRUB..."
     if command -v grub-mkconfig &>/dev/null; then
         grub-mkconfig -o /boot/grub/grub.cfg >> "$LOG_FILE" 2>&1 || true
     fi
-    success "GRUB updated — Proxmox kernel active"
+    success "GRUB updated — Proxmox kernel active after reboot"
 
     info "Removing os-prober..."
     apt-get remove -y os-prober >> "$LOG_FILE" 2>&1 || true
     success "os-prober removed"
+
+    save_state "proxmox"
 }
 
-# ── System config ──────────────────────────────────────────
+# ── Setup resume service ────────────────────────────────────
+setup_resume_service() {
+    info "Setting up post-reboot resume service..."
+    local script_path
+    script_path="$(realpath "$0")"
+
+    cat > "$COCO_SERVICE" << SVCEOF
+[Unit]
+Description=COCO Installer Resume
+After=network.target
+ConditionPathExists=${STATE_FILE}
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash ${script_path} --resume
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+    systemctl daemon-reload >> "$LOG_FILE" 2>&1
+    systemctl enable coco-install-resume.service >> "$LOG_FILE" 2>&1
+    success "Resume service registered"
+}
+
+remove_resume_service() {
+    if [[ -f "$COCO_SERVICE" ]]; then
+        systemctl disable coco-install-resume.service >> "$LOG_FILE" 2>&1 || true
+        rm -f "$COCO_SERVICE"
+        systemctl daemon-reload >> "$LOG_FILE" 2>&1 || true
+    fi
+}
+
+# ── Reboot checkpoint ──────────────────────────────────────
+reboot_for_kernel() {
+    done_state "rebooted" && { success "Kernel reboot: already done"; return; }
+
+    setup_resume_service
+
+    echo ""
+    echo -e "${YELLOW}"
+    cat << 'RBT'
+  ────────────────────────────────────────────────
+   Reboot required to activate Proxmox VE kernel.
+   Installation will resume automatically after reboot.
+  ────────────────────────────────────────────────
+RBT
+    echo -e "${RESET}"
+    save_state "rebooted"
+    info "Rebooting in 5 seconds..."
+    sleep 5
+    reboot
+    exit 0
+}
+
+# ── Post-reboot: system config ─────────────────────────────
 configure_system() {
+    done_state "sysconfig" && { success "System config: already done"; return; }
     step "Configuring system"
 
-    info "Enabling IP forwarding..."
-    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-coco.conf
-    /sbin/sysctl -p /etc/sysctl.d/99-coco.conf >> "$LOG_FILE" 2>&1
-    success "IP forwarding enabled"
-}
+    local kernel
+    kernel=$(uname -r)
+    info "Running kernel: ${kernel}"
 
-# ── Docker ─────────────────────────────────────────────────
-install_docker() {
-    step "Installing Docker"
-
-    if command -v docker &>/dev/null; then
-        success "Docker already installed: $(docker --version | cut -d' ' -f3 | tr -d ',')"
-        return
+    if [[ "$kernel" != *"pve"* ]]; then
+        warn "Not running Proxmox kernel yet (${kernel}) — may need another reboot"
+    else
+        success "Proxmox kernel active: ${kernel}"
     fi
 
-    info "Installing Docker prerequisites..."
+    info "Enabling IP forwarding..."
+    echo "net.ipv4.ip_forward=1"   > /etc/sysctl.d/99-coco.conf
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-coco.conf
+    sysctl -p /etc/sysctl.d/99-coco.conf >> "$LOG_FILE" 2>&1
+    success "IP forwarding enabled"
+
+    save_state "sysconfig"
+}
+
+# ── Python / FastAPI backend ───────────────────────────────
+install_backend() {
+    done_state "backend" && { success "Backend: already installed"; return; }
+    step "Installing Python + FastAPI backend"
+
+    info "Installing Python packages..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        ca-certificates curl gnupg >> "$LOG_FILE" 2>&1
-
-    info "Adding Docker GPG key and repository..."
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/debian/gpg \
-        -o /etc/apt/keyrings/docker.asc >> "$LOG_FILE" 2>&1
-    chmod a+r /etc/apt/keyrings/docker.asc
-
-    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] \
-https://download.docker.com/linux/debian trixie stable" \
-        > /etc/apt/sources.list.d/docker.list
-
-    apt-get update -qq >> "$LOG_FILE" 2>&1
-
-    info "Installing Docker Engine..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        docker-ce docker-ce-cli containerd.io \
-        docker-buildx-plugin docker-compose-plugin \
+        python3 python3-pip python3-venv python3-dev \
+        build-essential libssl-dev libffi-dev \
         >> "$LOG_FILE" 2>&1
+    success "Python installed: $(python3 --version)"
 
-    systemctl enable --now docker >> "$LOG_FILE" 2>&1
-    success "Docker $(docker --version | cut -d' ' -f3 | tr -d ',')"
+    info "Creating COCO Python venv..."
+    python3 -m venv "${COCO_DIR}/venv" >> "$LOG_FILE" 2>&1
+    "${COCO_DIR}/venv/bin/pip" install --quiet --upgrade pip >> "$LOG_FILE" 2>&1
+    "${COCO_DIR}/venv/bin/pip" install --quiet \
+        fastapi uvicorn[standard] \
+        sqlalchemy alembic psycopg2-binary \
+        python-jose[cryptography] passlib[bcrypt] \
+        python-multipart httpx pydantic-settings \
+        ansible-runner \
+        >> "$LOG_FILE" 2>&1
+    success "FastAPI + dependencies installed"
+
+    save_state "backend"
+}
+
+# ── PostgreSQL ─────────────────────────────────────────────
+install_postgres() {
+    done_state "postgres" && { success "PostgreSQL: already installed"; return; }
+    step "Installing PostgreSQL"
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        postgresql postgresql-client \
+        >> "$LOG_FILE" 2>&1
+    systemctl enable --now postgresql >> "$LOG_FILE" 2>&1
+
+    info "Creating COCO database and user..."
+    local db_pass
+    db_pass=$(openssl rand -hex 16)
+    sudo -u postgres psql -c "CREATE USER coco WITH PASSWORD '${db_pass}';" \
+        >> "$LOG_FILE" 2>&1 || true
+    sudo -u postgres psql -c "CREATE DATABASE coco OWNER coco;" \
+        >> "$LOG_FILE" 2>&1 || true
+
+    echo "DB_URL=postgresql://coco:${db_pass}@localhost/coco" \
+        >> "${COCO_DIR}/.env"
+    success "PostgreSQL ready — database: coco"
+
+    save_state "postgres"
+}
+
+# ── Redis ──────────────────────────────────────────────────
+install_redis() {
+    done_state "redis" && { success "Redis: already installed"; return; }
+    step "Installing Redis"
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server \
+        >> "$LOG_FILE" 2>&1
+    systemctl enable --now redis-server >> "$LOG_FILE" 2>&1
+    success "Redis running"
+
+    save_state "redis"
 }
 
 # ── Ansible ────────────────────────────────────────────────
 install_ansible() {
+    done_state "ansible" && { success "Ansible: already installed"; return; }
     step "Installing Ansible"
 
-    if command -v ansible &>/dev/null; then
-        success "Ansible already installed"
-        return
-    fi
-
-    info "Installing Ansible via pip..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        python3 python3-pip python3-venv >> "$LOG_FILE" 2>&1
+        ansible ansible-core \
+        >> "$LOG_FILE" 2>&1
+    success "Ansible: $(ansible --version | head -1)"
 
-    python3 -m pip install --quiet --break-system-packages ansible >> "$LOG_FILE" 2>&1
-    success "Ansible $(ansible --version | head -1 | awk '{print $2}')"
+    save_state "ansible"
 }
 
 # ── Packer ─────────────────────────────────────────────────
 install_packer() {
+    done_state "packer" && { success "Packer: already installed"; return; }
     step "Installing Packer"
 
-    if command -v packer &>/dev/null; then
-        success "Packer already installed: $(packer --version)"
-        return
-    fi
-
     local PACKER_VER="1.11.0"
-    info "Downloading Packer ${PACKER_VER}..."
     wget -q \
         "https://releases.hashicorp.com/packer/${PACKER_VER}/packer_${PACKER_VER}_linux_amd64.zip" \
         -O /tmp/packer.zip >> "$LOG_FILE" 2>&1
     unzip -q /tmp/packer.zip -d /usr/local/bin/
     rm -f /tmp/packer.zip
     chmod +x /usr/local/bin/packer
-    success "Packer $(packer --version)"
+    success "Packer: $(packer --version)"
+
+    save_state "packer"
 }
 
-# ── COCO ───────────────────────────────────────────────────
+# ── SSL Certificate ────────────────────────────────────────
+setup_ssl() {
+    done_state "ssl" && { success "SSL: already configured"; return; }
+    step "Generating SSL certificate"
+
+    mkdir -p "${COCO_DIR}/ssl"
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "${COCO_DIR}/ssl/coco.key" \
+        -out "${COCO_DIR}/ssl/coco.crt" \
+        -subj "/C=CH/ST=COCO/L=COCO/O=COCO/CN=${COCO_IP}" \
+        >> "$LOG_FILE" 2>&1
+    chmod 600 "${COCO_DIR}/ssl/coco.key"
+    success "SSL certificate generated (self-signed, 365 days)"
+
+    save_state "ssl"
+}
+
+# ── COCO directories + env ─────────────────────────────────
 setup_coco() {
+    done_state "coco" && { success "COCO dirs: already set up"; return; }
     step "Setting up COCO"
 
-    info "Creating directory structure..."
-    mkdir -p "${COCO_DIR}"/{docker,ansible,packer,configs}
+    mkdir -p "${COCO_DIR}"/{backend,frontend,ansible,packer,ssl,logs}
 
-    info "Writing environment config..."
     cat > "${COCO_DIR}/.env" << ENVEOF
-# COCO Environment — generated by install.sh $(date)
+# COCO Environment — generated $(date)
 SECRET_KEY=${SECRET_KEY}
 COCO_IP=${COCO_IP}
-COCO_PORT=${COCO_PORT}
+COCO_PORT=443
 PVE_HOSTNAME=${PVE_HOSTNAME}
 PVE_NODE=${PVE_HOSTNAME}
-# Game network is configured via COCO Web-GUI
+SSL_CERT=${COCO_DIR}/ssl/coco.crt
+SSL_KEY=${COCO_DIR}/ssl/coco.key
 ENVEOF
     chmod 600 "${COCO_DIR}/.env"
-    success "Config written to ${COCO_DIR}/.env"
+    success "Environment config written"
 
     info "Cloning COCO repository..."
     if [[ ! -d "${COCO_DIR}/repo" ]]; then
-        git clone https://github.com/Tox1cfnbr7/coco.git "${COCO_DIR}/repo" >> "$LOG_FILE" 2>&1
+        git clone https://github.com/Tox1cfnbr7/coco.git \
+            "${COCO_DIR}/repo" >> "$LOG_FILE" 2>&1
     fi
-    success "Repository cloned to ${COCO_DIR}/repo"
+    success "Repository ready at ${COCO_DIR}/repo"
+
+    save_state "coco"
 }
 
 # ── Done ───────────────────────────────────────────────────
 print_done() {
+    remove_resume_service
+    rm -f "${COCO_DIR}/.install-config"
+    save_state "complete"
+
     echo ""
     echo -e "${GREEN}"
     cat << 'DONE'
   ────────────────────────────────────────────────
    COCO installation complete.
-   A reboot is required to activate Proxmox VE.
   ────────────────────────────────────────────────
 DONE
     echo -e "${RESET}"
-    echo -e "  After reboot:"
     echo -e "  Proxmox GUI  :  ${CYAN}https://${COCO_IP}:8006${RESET}"
-    echo -e "  COCO Web-GUI :  ${CYAN}http://${COCO_IP}:${COCO_PORT}${RESET}"
-    echo -e "  Guacamole    :  ${CYAN}http://${COCO_IP}:8443${RESET}"
+    echo -e "  COCO Web-GUI :  ${CYAN}https://${COCO_IP}:443${RESET}  ${DIM}(after deploying backend)${RESET}"
     echo -e "  Config       :  ${COCO_DIR}/.env"
     echo -e "  Logs         :  ${LOG_FILE}"
     echo ""
     divider
-    read -rp "  Reboot now? [y/N]: " reboot_now
-    if [[ "${reboot_now,,}" == "y" ]]; then
-        info "Rebooting..."
-        reboot
-    else
-        warn "Remember to reboot before using Proxmox VE."
-    fi
     echo ""
 }
 
-# ── Main ───────────────────────────────────────────────────
-main() {
-    mkdir -p "$(dirname "$LOG_FILE")"
-    print_logo
-    check_root
-    check_os
+# ── Main flow ──────────────────────────────────────────────
+run_all() {
     install_bootstrap
-    collect_config
     install_proxmox
+    reboot_for_kernel
     configure_system
-    install_docker
+    install_backend
+    install_postgres
+    install_redis
     install_ansible
     install_packer
+    setup_ssl
     setup_coco
     print_done
 }
 
-main "$@"
+main() {
+    mkdir -p "$(dirname "$LOG_FILE")"
+    mkdir -p "${COCO_DIR}"
+    print_logo
+
+    if [[ "${1:-}" == "--resume" ]]; then
+        info "Resuming after reboot..."
+        load_config
+        run_all
+        return
+    fi
+
+    check_root
+    check_os
+    collect_config
+    run_all
+}
+
+main "${@}"

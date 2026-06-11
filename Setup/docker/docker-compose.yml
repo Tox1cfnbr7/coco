@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+
+  frontend:
+    build: ./frontend
+    container_name: coco-frontend
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+  api:
+    build: ./api
+    container_name: coco-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock
+      - ../ansible:/ansible:ro
+      - ../packer:/packer:ro
+
+  db:
+    image: postgres:16-alpine
+    container_name: coco-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=coco
+      - POSTGRES_PASSWORD=coco
+      - POSTGRES_DB=coco
+    volumes:
+      - coco-db-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: coco-redis
+    restart: unless-stopped
+
+  guacamole:
+    image: guacamole/guacamole:latest
+    container_name: coco-guacamole
+    restart: unless-stopped
+    ports:
+      - "8443:8080"
+    environment:
+      - GUACD_HOSTNAME=guacd
+      - POSTGRESQL_HOSTNAME=db
+      - POSTGRESQL_DATABASE=guacamole_db
+      - POSTGRESQL_USERNAME=coco
+      - POSTGRESQL_PASSWORD=coco
+    depends_on:
+      - guacd
+      - db
+
+  guacd:
+    image: guacamole/guacd:latest
+    container_name: coco-guacd
+    restart: unless-stopped
+
+volumes:
+  coco-db-data:

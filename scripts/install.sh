@@ -241,21 +241,28 @@ REPOEOF
 # ── Setup resume service ────────────────────────────────────
 setup_resume_service() {
     info "Setting up post-reboot resume service..."
-    local script_path
-    script_path="$(realpath "$0")"
+
+    # Script an fixen Ort kopieren damit es nach Reboot gefunden wird
+    cp "$(realpath "$0")" "${COCO_DIR}/install.sh" 2>/dev/null || \
+        cp "$0" "${COCO_DIR}/install.sh" 2>/dev/null || true
+    chmod +x "${COCO_DIR}/install.sh"
+    info "Installer copied to ${COCO_DIR}/install.sh"
 
     cat > "$COCO_SERVICE" << SVCEOF
 [Unit]
 Description=COCO Installer Resume
-After=network.target
+After=network-online.target
+Wants=network-online.target
 ConditionPathExists=${STATE_FILE}
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash ${script_path} --resume
+ExecStartPre=/bin/sleep 10
+ExecStart=/usr/bin/bash ${COCO_DIR}/install.sh --resume
 RemainAfterExit=yes
-StandardOutput=journal
-StandardError=journal
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=1800
 
 [Install]
 WantedBy=multi-user.target
@@ -263,7 +270,7 @@ SVCEOF
 
     systemctl daemon-reload >> "$LOG_FILE" 2>&1
     systemctl enable coco-install-resume.service >> "$LOG_FILE" 2>&1
-    success "Resume service registered"
+    success "Resume service registered — will continue after reboot"
 }
 
 remove_resume_service() {
@@ -278,6 +285,11 @@ remove_resume_service() {
 reboot_for_kernel() {
     done_state "rebooted" && { success "Kernel reboot: already done"; return; }
 
+    info "Copying installer to permanent location..."
+    cp "$(realpath "$0")" "${COCO_DIR}/install.sh"
+    chmod +x "${COCO_DIR}/install.sh"
+    success "Installer saved to ${COCO_DIR}/install.sh"
+
     setup_resume_service
 
     echo ""
@@ -285,7 +297,8 @@ reboot_for_kernel() {
     cat << 'RBT'
   ────────────────────────────────────────────────
    Reboot required to activate Proxmox VE kernel.
-   Installation will resume automatically after reboot.
+   Installation will resume automatically.
+   Watch progress: journalctl -fu coco-install-resume
   ────────────────────────────────────────────────
 RBT
     echo -e "${RESET}"

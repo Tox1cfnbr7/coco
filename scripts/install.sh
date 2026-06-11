@@ -3,13 +3,11 @@ set -euo pipefail
 
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.2.0
+#   Installer v0.3.0
 #   Target: Debian 13 (Trixie)
-#   Installs: Proxmox VE 9, KVM/libvirt, Docker,
-#             Ansible, Packer, COCO Stack
 # ============================================================
 
-COCO_VERSION="0.2.0"
+COCO_VERSION="0.3.0"
 COCO_DIR="/opt/coco"
 LOG_FILE="/var/log/coco-install.log"
 
@@ -21,7 +19,6 @@ BOLD='\033[1m'
 DIM='\033[2m'
 RESET='\033[0m'
 
-# ── Logging ────────────────────────────────────────────────
 log()     { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"; }
 info()    { echo -e "${CYAN}  [*]${RESET} $*"; log "INFO: $*"; }
 success() { echo -e "${GREEN}  [+]${RESET} $*"; log "OK:   $*"; }
@@ -30,7 +27,6 @@ error()   { echo -e "${RED}  [-] $*${RESET}"; log "ERR:  $*"; exit 1; }
 step()    { echo ""; echo -e "  ${BOLD}${CYAN}>> $*${RESET}"; echo ""; }
 divider() { echo -e "  ${DIM}────────────────────────────────────────────────${RESET}"; }
 
-# ── Logo ───────────────────────────────────────────────────
 print_logo() {
     clear
     echo -e "${CYAN}"
@@ -57,9 +53,7 @@ check_root() {
 check_os() {
     step "System check"
     [[ -f /etc/debian_version ]] || error "Requires Debian 13. Detected: $(uname -s)"
-    local ver
-    ver=$(cat /etc/debian_version)
-    success "OS: Debian ${ver}"
+    success "OS: Debian $(cat /etc/debian_version)"
 
     local ram_gb
     ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
@@ -76,13 +70,28 @@ check_os() {
     fi
 }
 
-# ── Interactive Config ─────────────────────────────────────
+# ── Bootstrap dependencies ─────────────────────────────────
+install_bootstrap() {
+    step "Installing bootstrap dependencies"
+    info "Updating package index..."
+    apt-get update -qq >> "$LOG_FILE" 2>&1
+
+    info "Installing required tools..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        curl wget git vim unzip jq openssl \
+        grub2-common grub-pc-bin \
+        ca-certificates gnupg lsb-release \
+        python3 python3-pip python3-venv \
+        >> "$LOG_FILE" 2>&1
+    success "Bootstrap dependencies installed"
+}
+
+# ── Config ─────────────────────────────────────────────────
 collect_config() {
     step "Configuration"
     echo -e "  ${DIM}Press Enter to accept the default value shown in brackets.${RESET}"
     echo ""
 
-    # Network
     local detected_ip
     detected_ip=$(hostname -I | awk '{print $1}')
 
@@ -92,15 +101,10 @@ collect_config() {
     read -rp "  $(echo -e "${BOLD}COCO Web-GUI port${RESET}") [8080]: " COCO_PORT
     COCO_PORT=${COCO_PORT:-8080}
 
-    # Proxmox
-    echo ""
-    echo -e "  ${DIM}Proxmox VE will be installed on this machine.${RESET}"
-    echo -e "  ${DIM}The hostname will become the Proxmox node name.${RESET}"
-    echo ""
-
     local detected_hostname
     detected_hostname=$(hostname)
 
+    echo ""
     read -rp "  $(echo -e "${BOLD}Proxmox hostname${RESET}") [${detected_hostname}]: " PVE_HOSTNAME
     PVE_HOSTNAME=${PVE_HOSTNAME:-$detected_hostname}
 
@@ -112,10 +116,8 @@ collect_config() {
     [[ "$PVE_ROOT_PASSWORD" == "$PVE_ROOT_PASSWORD_CONFIRM" ]] || error "Passwords do not match."
     [[ ${#PVE_ROOT_PASSWORD} -ge 8 ]] || error "Password must be at least 8 characters."
 
-    # Generate secret
     SECRET_KEY=$(openssl rand -hex 32)
 
-    # Summary
     echo ""
     step "Summary"
     divider
@@ -152,9 +154,17 @@ HOSTSEOF
     rm -f /etc/apt/sources.list.d/pve-enterprise.list
     rm -f /etc/apt/sources.list.d/ceph.list
     rm -f /etc/apt/trusted.gpg.d/proxmox-*.gpg
+    rm -f /usr/share/keyrings/proxmox-*.gpg
     success "Old sources cleaned"
 
-    info "Adding Proxmox VE repository (Trixie)..."
+    info "Downloading Proxmox GPG key..."
+    wget --no-check-certificate -q \
+        https://download.proxmox.com/debian/proxmox-release-trixie.gpg \
+        -O /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg \
+        >> "$LOG_FILE" 2>&1
+    success "GPG key installed"
+
+    info "Adding Proxmox VE repository (Trixie, no-subscription)..."
     cat > /etc/apt/sources.list.d/pve-install-repo.sources << REPOEOF
 Types: deb
 URIs: http://download.proxmox.com/debian/pve
@@ -164,25 +174,12 @@ Signed-By: /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
 REPOEOF
     success "Repository configured"
 
-    info "Downloading Proxmox GPG key (Trixie)..."
-    wget --no-check-certificate -q \
-        https://download.proxmox.com/debian/proxmox-release-trixie.gpg \
-        -O /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
-    success "GPG key installed"
-
-    info "Removing enterprise repository if present..."
-    rm -f /etc/apt/sources.list.d/pve-enterprise.list
-    rm -f /etc/apt/sources.list.d/ceph.list
-    find /etc/apt/sources.list.d/ -name "*.sources" \
-        -exec grep -l "enterprise.proxmox.com" {} \; | xargs rm -f 2>/dev/null || true
-    success "Enterprise repository removed"
-
     info "Updating package index and upgrading base system..."
     apt-get update -qq >> "$LOG_FILE" 2>&1
     DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y -qq >> "$LOG_FILE" 2>&1
     success "Base system up to date"
 
-    info "Installing Proxmox VE kernel (reboot required after)..."
+    info "Installing Proxmox VE kernel..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-default-kernel \
         >> "$LOG_FILE" 2>&1
     success "Proxmox kernel installed"
@@ -200,15 +197,25 @@ REPOEOF
     info "Removing Debian default kernel..."
     DEBIAN_FRONTEND=noninteractive apt-get remove -y \
         linux-image-amd64 'linux-image-6.12*' >> "$LOG_FILE" 2>&1 || true
-    update-grub >> "$LOG_FILE" 2>&1
-    success "Debian kernel removed — Proxmox kernel active"
+    success "Debian kernel removed"
 
-    info "Removing os-prober (can cause issues with VM disks in GRUB)..."
+    info "Updating GRUB configuration..."
+    if command -v update-grub &>/dev/null; then
+        update-grub >> "$LOG_FILE" 2>&1
+    elif command -v grub-mkconfig &>/dev/null; then
+        grub-mkconfig -o /boot/grub/grub.cfg >> "$LOG_FILE" 2>&1
+    else
+        DEBIAN_FRONTEND=noninteractive apt-get install -y grub2 >> "$LOG_FILE" 2>&1
+        grub-mkconfig -o /boot/grub/grub.cfg >> "$LOG_FILE" 2>&1
+    fi
+    success "GRUB updated — Proxmox kernel active"
+
+    info "Removing os-prober..."
     apt-get remove -y os-prober >> "$LOG_FILE" 2>&1 || true
     success "os-prober removed"
 }
 
-# ── Post-Proxmox config ────────────────────────────────────
+# ── System config ──────────────────────────────────────────
 configure_system() {
     step "Configuring system"
 
@@ -216,12 +223,6 @@ configure_system() {
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-coco.conf
     sysctl -p /etc/sysctl.d/99-coco.conf >> "$LOG_FILE" 2>&1
     success "IP forwarding enabled"
-
-    info "Installing base tools..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        curl wget git vim unzip jq openssl \
-        >> "$LOG_FILE" 2>&1
-    success "Base tools installed"
 }
 
 # ── Docker ─────────────────────────────────────────────────
@@ -233,8 +234,28 @@ install_docker() {
         return
     fi
 
-    info "Downloading and running Docker install script..."
-    curl -fsSL https://get.docker.com | bash >> "$LOG_FILE" 2>&1
+    info "Installing Docker prerequisites..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        ca-certificates curl gnupg >> "$LOG_FILE" 2>&1
+
+    info "Adding Docker GPG key and repository..."
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/debian/gpg \
+        -o /etc/apt/keyrings/docker.asc >> "$LOG_FILE" 2>&1
+    chmod a+r /etc/apt/keyrings/docker.asc
+
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/debian trixie stable" \
+        > /etc/apt/sources.list.d/docker.list
+
+    apt-get update -qq >> "$LOG_FILE" 2>&1
+
+    info "Installing Docker Engine..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin \
+        >> "$LOG_FILE" 2>&1
+
     systemctl enable --now docker >> "$LOG_FILE" 2>&1
     success "Docker $(docker --version | cut -d' ' -f3 | tr -d ',')"
 }
@@ -248,8 +269,11 @@ install_ansible() {
         return
     fi
 
-    apt-get install -y -qq python3 python3-pip python3-venv >> "$LOG_FILE" 2>&1
-    pip3 install --quiet ansible >> "$LOG_FILE" 2>&1
+    info "Installing Ansible via pip..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        python3 python3-pip python3-venv >> "$LOG_FILE" 2>&1
+
+    python3 -m pip install --quiet --break-system-packages ansible >> "$LOG_FILE" 2>&1
     success "Ansible $(ansible --version | head -1 | awk '{print $2}')"
 }
 
@@ -258,21 +282,22 @@ install_packer() {
     step "Installing Packer"
 
     if command -v packer &>/dev/null; then
-        success "Packer already installed"
+        success "Packer already installed: $(packer --version)"
         return
     fi
 
     local PACKER_VER="1.11.0"
     info "Downloading Packer ${PACKER_VER}..."
-    wget -q "https://releases.hashicorp.com/packer/${PACKER_VER}/packer_${PACKER_VER}_linux_amd64.zip" \
-        -O /tmp/packer.zip
+    wget -q \
+        "https://releases.hashicorp.com/packer/${PACKER_VER}/packer_${PACKER_VER}_linux_amd64.zip" \
+        -O /tmp/packer.zip >> "$LOG_FILE" 2>&1
     unzip -q /tmp/packer.zip -d /usr/local/bin/
-    rm /tmp/packer.zip
+    rm -f /tmp/packer.zip
     chmod +x /usr/local/bin/packer
     success "Packer $(packer --version)"
 }
 
-# ── COCO Stack ─────────────────────────────────────────────
+# ── COCO ───────────────────────────────────────────────────
 setup_coco() {
     step "Setting up COCO"
 
@@ -281,24 +306,19 @@ setup_coco() {
 
     info "Writing environment config..."
     cat > "${COCO_DIR}/.env" << ENVEOF
-# COCO Environment — generated by install.sh
-# $(date)
-
+# COCO Environment — generated by install.sh $(date)
 SECRET_KEY=${SECRET_KEY}
-
 COCO_IP=${COCO_IP}
 COCO_PORT=${COCO_PORT}
-
 PVE_HOSTNAME=${PVE_HOSTNAME}
 PVE_NODE=${PVE_HOSTNAME}
-
-# Game network is configured via COCO Web-GUI, not here.
+# Game network is configured via COCO Web-GUI
 ENVEOF
     chmod 600 "${COCO_DIR}/.env"
     success "Config written to ${COCO_DIR}/.env"
 
     info "Cloning COCO repository..."
-    if [[ ! -d "${COCO_DIR}/.git" ]]; then
+    if [[ ! -d "${COCO_DIR}/repo" ]]; then
         git clone https://github.com/Tox1cfnbr7/coco.git "${COCO_DIR}/repo" >> "$LOG_FILE" 2>&1
     fi
     success "Repository cloned to ${COCO_DIR}/repo"
@@ -339,6 +359,7 @@ main() {
     print_logo
     check_root
     check_os
+    install_bootstrap
     collect_config
     install_proxmox
     configure_system

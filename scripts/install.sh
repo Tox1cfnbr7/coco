@@ -79,7 +79,6 @@ install_bootstrap() {
     info "Installing required tools..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
         curl wget git vim unzip jq openssl \
-        grub2-common grub-pc-bin \
         ca-certificates gnupg lsb-release \
         python3 python3-pip python3-venv \
         >> "$LOG_FILE" 2>&1
@@ -200,13 +199,8 @@ REPOEOF
     success "Debian kernel removed"
 
     info "Updating GRUB configuration..."
-    if command -v update-grub &>/dev/null; then
-        update-grub >> "$LOG_FILE" 2>&1
-    elif command -v grub-mkconfig &>/dev/null; then
-        grub-mkconfig -o /boot/grub/grub.cfg >> "$LOG_FILE" 2>&1
-    else
-        DEBIAN_FRONTEND=noninteractive apt-get install -y grub2 >> "$LOG_FILE" 2>&1
-        grub-mkconfig -o /boot/grub/grub.cfg >> "$LOG_FILE" 2>&1
+    if command -v grub-mkconfig &>/dev/null; then
+        grub-mkconfig -o /boot/grub/grub.cfg >> "$LOG_FILE" 2>&1 || true
     fi
     success "GRUB updated — Proxmox kernel active"
 

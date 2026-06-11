@@ -11,6 +11,9 @@ COCO_VERSION="0.3.0"
 COCO_DIR="/opt/coco"
 LOG_FILE="/var/log/coco-install.log"
 
+# Ensure sbin is in PATH (Debian 13 may not include it by default)
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -81,6 +84,7 @@ install_bootstrap() {
         curl wget git vim unzip jq openssl \
         ca-certificates gnupg lsb-release \
         python3 python3-pip python3-venv \
+        procps iproute2 \
         >> "$LOG_FILE" 2>&1
     success "Bootstrap dependencies installed"
 }
@@ -215,7 +219,7 @@ configure_system() {
 
     info "Enabling IP forwarding..."
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-coco.conf
-    sysctl -p /etc/sysctl.d/99-coco.conf >> "$LOG_FILE" 2>&1
+    /sbin/sysctl -p /etc/sysctl.d/99-coco.conf >> "$LOG_FILE" 2>&1
     success "IP forwarding enabled"
 }
 

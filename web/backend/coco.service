@@ -1,0 +1,25 @@
+[Unit]
+Description=COCO Attack & Defense Platform
+After=network.target postgresql.service redis.service
+Requires=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/coco/repo/web/backend
+ExecStart=/opt/coco/venv/bin/uvicorn main:app \
+    --host 0.0.0.0 \
+    --port 443 \
+    --ssl-certfile /opt/coco/ssl/coco.crt \
+    --ssl-keyfile /opt/coco/ssl/coco.key \
+    --workers 4 \
+    --access-log \
+    --log-level info
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONPATH=/opt/coco/repo/web/backend
+
+[Install]
+WantedBy=multi-user.target

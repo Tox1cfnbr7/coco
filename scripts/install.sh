@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.4.0
+#   Installer v0.5.0
 #   Target: Debian 13 (Trixie) + Proxmox VE 9
-#   No Docker — runs natively on the hypervisor
+#   Stack: FastAPI + React + PostgreSQL + Redis (native, no Docker)
 # ============================================================
 
 set -euo pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-COCO_VERSION="0.4.0"
+COCO_VERSION="0.5.0"
 COCO_DIR="/opt/coco"
 LOG_FILE="/var/log/coco-install.log"
 STATE_FILE="/var/lib/coco-install.state"
@@ -335,13 +335,21 @@ install_backend() {
     info "Creating COCO Python venv..."
     python3 -m venv "${COCO_DIR}/venv" >> "$LOG_FILE" 2>&1
     "${COCO_DIR}/venv/bin/pip" install --quiet --upgrade pip >> "$LOG_FILE" 2>&1
-    "${COCO_DIR}/venv/bin/pip" install --quiet \
-        fastapi uvicorn[standard] \
-        sqlalchemy alembic psycopg2-binary \
-        python-jose[cryptography] passlib[bcrypt] \
-        python-multipart httpx pydantic-settings \
-        ansible-runner \
-        >> "$LOG_FILE" 2>&1
+
+    info "Installing Python dependencies from requirements.txt..."
+    if [[ -f "${COCO_DIR}/repo/web/backend/requirements.txt" ]]; then
+        "${COCO_DIR}/venv/bin/pip" install --quiet \
+            -r "${COCO_DIR}/repo/web/backend/requirements.txt" \
+            >> "$LOG_FILE" 2>&1
+    else
+        "${COCO_DIR}/venv/bin/pip" install --quiet \
+            fastapi "uvicorn[standard]" \
+            sqlalchemy alembic psycopg2-binary \
+            "python-jose[cryptography]" "passlib[bcrypt]" \
+            python-multipart httpx pydantic-settings \
+            redis slowapi python-dotenv \
+            >> "$LOG_FILE" 2>&1
+    fi
     success "FastAPI + dependencies installed"
 
     save_state "backend"
@@ -415,7 +423,95 @@ install_packer() {
     save_state "packer"
 }
 
-# ── SSL Certificate ────────────────────────────────────────
+# ── Node.js ────────────────────────────────────────────────
+install_node() {
+    done_state "node" && { success "Node.js: already installed"; return; }
+    step "Installing Node.js"
+
+    info "Adding Node.js 22 LTS repository..."
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >> "$LOG_FILE" 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs >> "$LOG_FILE" 2>&1
+    success "Node.js: $(node --version)  npm: $(npm --version)"
+
+    save_state "node"
+}
+
+# ── Frontend build ──────────────────────────────────────────
+build_frontend() {
+    done_state "frontend" && { success "Frontend: already built"; return; }
+    step "Building React frontend"
+
+    local frontend_dir="${COCO_DIR}/repo/web/frontend"
+
+    if [[ ! -d "$frontend_dir" ]]; then
+        warn "Frontend source not found at ${frontend_dir} — skipping build"
+        return
+    fi
+
+    info "Installing npm dependencies..."
+    cd "$frontend_dir"
+    npm install --silent >> "$LOG_FILE" 2>&1
+    success "npm packages installed"
+
+    info "Building production bundle..."
+    npm run build >> "$LOG_FILE" 2>&1
+    success "Frontend built → ${frontend_dir}/dist"
+
+    save_state "frontend"
+}
+
+# ── Deploy COCO service ─────────────────────────────────────
+deploy_service() {
+    done_state "service" && { success "COCO service: already deployed"; return; }
+    step "Deploying COCO systemd service"
+
+    local service_src="${COCO_DIR}/repo/web/backend/coco.service"
+
+    if [[ -f "$service_src" ]]; then
+        cp "$service_src" /etc/systemd/system/coco.service
+    else
+        cat > /etc/systemd/system/coco.service << SVCEOF
+[Unit]
+Description=COCO Attack & Defense Platform
+After=network.target postgresql.service redis.service
+Requires=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${COCO_DIR}/repo/web/backend
+ExecStart=${COCO_DIR}/venv/bin/uvicorn main:app \\
+    --host 0.0.0.0 \\
+    --port 443 \\
+    --ssl-certfile ${COCO_DIR}/ssl/coco.crt \\
+    --ssl-keyfile ${COCO_DIR}/ssl/coco.key \\
+    --workers 4 \\
+    --access-log \\
+    --log-level info
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONPATH=${COCO_DIR}/repo/web/backend
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    fi
+
+    systemctl daemon-reload >> "$LOG_FILE" 2>&1
+    systemctl enable coco >> "$LOG_FILE" 2>&1
+    systemctl start coco >> "$LOG_FILE" 2>&1 || true
+
+    sleep 2
+    if systemctl is-active --quiet coco; then
+        success "COCO service running on port 443"
+    else
+        warn "COCO service failed to start — check: journalctl -xeu coco"
+    fi
+
+    save_state "service"
+}
 setup_ssl() {
     done_state "ssl" && { success "SSL: already configured"; return; }
     step "Generating SSL certificate"
@@ -453,9 +549,12 @@ ENVEOF
     success "Environment config written"
 
     info "Cloning COCO repository..."
-    if [[ ! -d "${COCO_DIR}/repo" ]]; then
+    if [[ ! -d "${COCO_DIR}/repo/.git" ]]; then
         git clone https://github.com/Tox1cfnbr7/coco.git \
             "${COCO_DIR}/repo" >> "$LOG_FILE" 2>&1
+    else
+        info "Repo already cloned — pulling latest..."
+        git -C "${COCO_DIR}/repo" pull >> "$LOG_FILE" 2>&1
     fi
     success "Repository ready at ${COCO_DIR}/repo"
 
@@ -477,9 +576,10 @@ print_done() {
 DONE
     echo -e "${RESET}"
     echo -e "  Proxmox GUI  :  ${CYAN}https://${COCO_IP}:8006${RESET}"
-    echo -e "  COCO Web-GUI :  ${CYAN}https://${COCO_IP}:443${RESET}  ${DIM}(after deploying backend)${RESET}"
+    echo -e "  COCO Web-GUI :  ${CYAN}https://${COCO_IP}${RESET}"
     echo -e "  Config       :  ${COCO_DIR}/.env"
     echo -e "  Logs         :  ${LOG_FILE}"
+    echo -e "  Service      :  systemctl status coco"
     echo ""
     divider
     echo ""
@@ -491,13 +591,16 @@ run_all() {
     install_proxmox
     reboot_for_kernel
     configure_system
-    install_backend
+    setup_coco           # clone repo first so requirements.txt is available
+    install_backend      # uses repo/web/backend/requirements.txt
     install_postgres
     install_redis
     install_ansible
     install_packer
+    install_node
     setup_ssl
-    setup_coco
+    build_frontend
+    deploy_service
     print_done
 }
 

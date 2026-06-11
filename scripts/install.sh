@@ -3,29 +3,34 @@ set -euo pipefail
 
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.1.0
+#   Installer v0.2.0
 #   Target: Debian 13 (Trixie)
+#   Installs: Proxmox VE 9, KVM/libvirt, Docker,
+#             Ansible, Packer, COCO Stack
 # ============================================================
 
-COCO_VERSION="0.1.0"
+COCO_VERSION="0.2.0"
 COCO_DIR="/opt/coco"
 LOG_FILE="/var/log/coco-install.log"
-REQUIRED_RAM_GB=16
-REQUIRED_DISK_GB=50
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
+DIM='\033[2m'
 RESET='\033[0m'
 
+# ── Logging ────────────────────────────────────────────────
 log()     { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"; }
 info()    { echo -e "${CYAN}  [*]${RESET} $*"; log "INFO: $*"; }
 success() { echo -e "${GREEN}  [+]${RESET} $*"; log "OK:   $*"; }
 warn()    { echo -e "${YELLOW}  [!]${RESET} $*"; log "WARN: $*"; }
-error()   { echo -e "${RED}  [-] ERROR: $*${RESET}"; log "ERR:  $*"; exit 1; }
+error()   { echo -e "${RED}  [-] $*${RESET}"; log "ERR:  $*"; exit 1; }
+step()    { echo ""; echo -e "  ${BOLD}${CYAN}>> $*${RESET}"; echo ""; }
+divider() { echo -e "  ${DIM}────────────────────────────────────────────────${RESET}"; }
 
+# ── Logo ───────────────────────────────────────────────────
 print_logo() {
     clear
     echo -e "${CYAN}"
@@ -39,196 +44,276 @@ print_logo() {
          Attack & Defense Platform
 LOGO
     echo -e "${RESET}"
-    echo -e "  ${BOLD}Version${RESET}  ${COCO_VERSION}"
-    echo -e "  ${BOLD}Target${RESET}   Debian 13 (Trixie)"
-    echo -e "  ${BOLD}Log${RESET}      ${LOG_FILE}"
-    echo -e "  ${CYAN}────────────────────────────────────────────${RESET}"
+    echo -e "  ${BOLD}Version${RESET}  ${COCO_VERSION}  |  ${BOLD}Target${RESET}  Debian 13  |  ${BOLD}Log${RESET}  ${LOG_FILE}"
+    divider
     echo ""
 }
 
+# ── Preflight ──────────────────────────────────────────────
 check_root() {
-    [[ $EUID -eq 0 ]] || error "This installer must be run as root.  Try: sudo bash install.sh"
+    [[ $EUID -eq 0 ]] || error "Run as root: sudo bash install.sh"
 }
 
 check_os() {
-    info "Checking operating system..."
-    [[ -f /etc/debian_version ]] || error "Requires Debian Linux. Detected: $(uname -s)"
-    success "Debian $(cat /etc/debian_version)"
-}
-
-check_resources() {
-    info "Checking system resources..."
+    step "System check"
+    [[ -f /etc/debian_version ]] || error "Requires Debian 13. Detected: $(uname -s)"
+    local ver
+    ver=$(cat /etc/debian_version)
+    success "OS: Debian ${ver}"
 
     local ram_gb
     ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
-    if [[ $ram_gb -lt $REQUIRED_RAM_GB ]]; then
-        warn "RAM: ${ram_gb} GB detected — recommended minimum is ${REQUIRED_RAM_GB} GB"
-    else
-        success "RAM: ${ram_gb} GB"
-    fi
+    [[ $ram_gb -lt 8 ]] && warn "RAM: ${ram_gb} GB — recommended 16+ GB" || success "RAM: ${ram_gb} GB"
 
     local disk_gb
     disk_gb=$(df / --output=avail -BG | tail -1 | tr -d 'G ')
-    if [[ $disk_gb -lt $REQUIRED_DISK_GB ]]; then
-        error "Not enough disk space: ${disk_gb} GB free, ${REQUIRED_DISK_GB} GB required"
-    else
-        success "Disk: ${disk_gb} GB available"
-    fi
+    [[ $disk_gb -lt 50 ]] && error "Disk: only ${disk_gb} GB free — need 50+ GB" || success "Disk: ${disk_gb} GB free"
 
     if grep -qE 'vmx|svm' /proc/cpuinfo; then
-        success "Nested virtualization: CPU flags present (vmx/svm)"
+        success "CPU: Nested virtualization flags present (vmx/svm)"
     else
-        warn "No vmx/svm CPU flags detected"
-        warn "Make sure Proxmox CPU type is set to 'host' for this VM"
+        warn "CPU: No vmx/svm flags — make sure Proxmox CPU type is set to 'host'"
     fi
 }
 
-prompt_config() {
+# ── Interactive Config ─────────────────────────────────────
+collect_config() {
+    step "Configuration"
+    echo -e "  ${DIM}Press Enter to accept the default value shown in brackets.${RESET}"
     echo ""
-    echo -e "  ${BOLD}Configuration${RESET}"
-    echo -e "  ${CYAN}────────────────────────────────────────────${RESET}"
 
-    read -rp "  COCO VM IP address   [192.168.118.133]: " COCO_IP
-    COCO_IP=${COCO_IP:-192.168.118.133}
+    # Network
+    local detected_ip
+    detected_ip=$(hostname -I | awk '{print $1}')
 
-    read -rp "  COCO Web-GUI port    [8080]: " COCO_PORT
+    read -rp "  $(echo -e "${BOLD}COCO VM IP address${RESET}") [${detected_ip}]: " COCO_IP
+    COCO_IP=${COCO_IP:-$detected_ip}
+
+    read -rp "  $(echo -e "${BOLD}COCO Web-GUI port${RESET}") [8080]: " COCO_PORT
     COCO_PORT=${COCO_PORT:-8080}
 
-    read -rp "  Proxmox host IP      [192.168.118.1]: " PROXMOX_HOST
-    PROXMOX_HOST=${PROXMOX_HOST:-192.168.118.1}
-
-    read -rp "  Proxmox API user     [root@pam]: " PROXMOX_USER
-    PROXMOX_USER=${PROXMOX_USER:-root@pam}
-
-    read -rsp "  Proxmox password: " PROXMOX_PASSWORD
+    # Proxmox
+    echo ""
+    echo -e "  ${DIM}Proxmox VE will be installed on this machine.${RESET}"
+    echo -e "  ${DIM}The hostname will become the Proxmox node name.${RESET}"
     echo ""
 
+    local detected_hostname
+    detected_hostname=$(hostname)
+
+    read -rp "  $(echo -e "${BOLD}Proxmox hostname${RESET}") [${detected_hostname}]: " PVE_HOSTNAME
+    PVE_HOSTNAME=${PVE_HOSTNAME:-$detected_hostname}
+
+    read -rsp "  $(echo -e "${BOLD}Proxmox root password${RESET}"): " PVE_ROOT_PASSWORD
+    echo ""
+    read -rsp "  $(echo -e "${BOLD}Confirm password${RESET}"): " PVE_ROOT_PASSWORD_CONFIRM
+    echo ""
+
+    [[ "$PVE_ROOT_PASSWORD" == "$PVE_ROOT_PASSWORD_CONFIRM" ]] || error "Passwords do not match."
+    [[ ${#PVE_ROOT_PASSWORD} -ge 8 ]] || error "Password must be at least 8 characters."
+
+    # Generate secret
     SECRET_KEY=$(openssl rand -hex 32)
 
+    # Summary
     echo ""
-    echo -e "  ${BOLD}Summary${RESET}"
-    echo -e "  ${CYAN}────────────────────────────────────────────${RESET}"
-    echo -e "  COCO Web-GUI  :  ${CYAN}http://${COCO_IP}:${COCO_PORT}${RESET}"
-    echo -e "  Guacamole     :  ${CYAN}http://${COCO_IP}:8443${RESET}"
-    echo -e "  Proxmox Host  :  ${PROXMOX_HOST}"
-    echo -e "  Install dir   :  ${COCO_DIR}"
+    step "Summary"
+    divider
+    echo -e "  COCO Web-GUI     :  ${CYAN}http://${COCO_IP}:${COCO_PORT}${RESET}"
+    echo -e "  Guacamole        :  ${CYAN}http://${COCO_IP}:8443${RESET}"
+    echo -e "  Proxmox hostname :  ${PVE_HOSTNAME}"
+    echo -e "  Proxmox GUI      :  ${CYAN}https://${COCO_IP}:8006${RESET}"
+    echo -e "  Install dir      :  ${COCO_DIR}"
+    divider
     echo ""
     read -rp "  Proceed with installation? [y/N]: " confirm
     [[ "${confirm,,}" == "y" ]] || error "Installation cancelled."
 }
 
-install_dependencies() {
+# ── Proxmox VE 9 ───────────────────────────────────────────
+install_proxmox() {
+    step "Installing Proxmox VE 9"
+
+    info "Setting hostname to ${PVE_HOSTNAME}..."
+    hostnamectl set-hostname "${PVE_HOSTNAME}"
+    echo "127.0.0.1   localhost" > /etc/hosts
+    echo "${COCO_IP}   ${PVE_HOSTNAME}.local ${PVE_HOSTNAME}" >> /etc/hosts
+    success "Hostname set"
+
+    info "Adding Proxmox VE repository..."
+    echo "deb [arch=amd64] http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
+        > /etc/apt/sources.list.d/pve-install-repo.list
+    wget -q -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg \
+        http://download.proxmox.com/debian/proxmox-release-bookworm.gpg
+    success "Repository added"
+
     info "Updating package index..."
     apt-get update -qq >> "$LOG_FILE" 2>&1
 
-    info "Installing system packages..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        curl wget git vim \
-        apt-transport-https ca-certificates gnupg lsb-release \
-        python3 python3-pip python3-venv \
-        qemu-kvm libvirt-daemon-system libvirt-clients virtinst \
-        bridge-utils vlan unzip jq openssl \
+    info "Installing Proxmox VE (this takes a few minutes)..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        proxmox-ve postfix open-iscsi chrony \
         >> "$LOG_FILE" 2>&1
-    success "System packages installed"
+    success "Proxmox VE installed"
 
-    info "Installing Docker..."
-    if ! command -v docker &>/dev/null; then
-        curl -fsSL https://get.docker.com | bash >> "$LOG_FILE" 2>&1
-        systemctl enable --now docker >> "$LOG_FILE" 2>&1
+    info "Setting Proxmox root password..."
+    echo "root:${PVE_ROOT_PASSWORD}" | chpasswd
+    success "Root password set"
+
+    info "Removing default kernel..."
+    apt-get remove -y linux-image-amd64 'linux-image-6.*' >> "$LOG_FILE" 2>&1 || true
+    update-grub >> "$LOG_FILE" 2>&1
+    success "Default kernel removed — Proxmox kernel active"
+
+    info "Removing enterprise repository (using no-subscription)..."
+    rm -f /etc/apt/sources.list.d/pve-enterprise.list
+    rm -f /etc/apt/sources.list.d/ceph.list
+    success "Enterprise repo removed"
+}
+
+# ── KVM / libvirt ──────────────────────────────────────────
+install_kvm() {
+    step "Installing KVM / libvirt (nested hypervisor)"
+
+    info "Installing packages..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        qemu-kvm libvirt-daemon-system libvirt-clients \
+        virtinst bridge-utils virt-manager \
+        >> "$LOG_FILE" 2>&1
+    success "KVM + libvirt installed"
+
+    info "Enabling libvirtd..."
+    systemctl enable --now libvirtd >> "$LOG_FILE" 2>&1
+    success "libvirtd running"
+
+    info "Enabling IP forwarding..."
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-coco.conf
+    sysctl -p /etc/sysctl.d/99-coco.conf >> "$LOG_FILE" 2>&1
+    success "IP forwarding enabled"
+}
+
+# ── Docker ─────────────────────────────────────────────────
+install_docker() {
+    step "Installing Docker"
+
+    if command -v docker &>/dev/null; then
+        success "Docker already installed: $(docker --version | cut -d' ' -f3 | tr -d ',')"
+        return
     fi
-    success "Docker $(docker --version | cut -d' ' -f3 | tr -d ',')"
 
-    info "Installing Ansible..."
+    info "Downloading and running Docker install script..."
+    curl -fsSL https://get.docker.com | bash >> "$LOG_FILE" 2>&1
+    systemctl enable --now docker >> "$LOG_FILE" 2>&1
+    success "Docker $(docker --version | cut -d' ' -f3 | tr -d ',')"
+}
+
+# ── Ansible ────────────────────────────────────────────────
+install_ansible() {
+    step "Installing Ansible"
+
+    if command -v ansible &>/dev/null; then
+        success "Ansible already installed"
+        return
+    fi
+
+    apt-get install -y -qq python3 python3-pip python3-venv >> "$LOG_FILE" 2>&1
     pip3 install --quiet ansible >> "$LOG_FILE" 2>&1
     success "Ansible $(ansible --version | head -1 | awk '{print $2}')"
+}
 
-    info "Installing Packer..."
-    if ! command -v packer &>/dev/null; then
-        local PACKER_VER="1.11.0"
-        wget -q "https://releases.hashicorp.com/packer/${PACKER_VER}/packer_${PACKER_VER}_linux_amd64.zip" \
-            -O /tmp/packer.zip >> "$LOG_FILE" 2>&1
-        unzip -q /tmp/packer.zip -d /usr/local/bin/
-        rm /tmp/packer.zip
-        chmod +x /usr/local/bin/packer
+# ── Packer ─────────────────────────────────────────────────
+install_packer() {
+    step "Installing Packer"
+
+    if command -v packer &>/dev/null; then
+        success "Packer already installed"
+        return
     fi
+
+    local PACKER_VER="1.11.0"
+    info "Downloading Packer ${PACKER_VER}..."
+    wget -q "https://releases.hashicorp.com/packer/${PACKER_VER}/packer_${PACKER_VER}_linux_amd64.zip" \
+        -O /tmp/packer.zip
+    unzip -q /tmp/packer.zip -d /usr/local/bin/
+    rm /tmp/packer.zip
+    chmod +x /usr/local/bin/packer
     success "Packer $(packer --version)"
 }
 
-setup_network() {
-    info "Configuring game bridge (br-game)..."
+# ── COCO Stack ─────────────────────────────────────────────
+setup_coco() {
+    step "Setting up COCO"
 
-    cat > /etc/network/interfaces.d/coco-bridge.cfg << NETCFG
-auto br-game
-iface br-game inet static
-    address 10.10.0.1
-    netmask 255.255.0.0
-    bridge_ports none
-    bridge_stp off
-    bridge_fd 0
-NETCFG
-
-    ip link add br-game type bridge 2>/dev/null || true
-    ip addr add 10.10.0.1/16 dev br-game 2>/dev/null || true
-    ip link set br-game up
-
-    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-coco.conf
-    sysctl -p /etc/sysctl.d/99-coco.conf >> "$LOG_FILE" 2>&1
-
-    success "Bridge br-game ready (10.10.0.0/16)"
-}
-
-setup_coco_dir() {
-    info "Creating COCO directory at ${COCO_DIR}..."
-    mkdir -p "${COCO_DIR}"
+    info "Creating directory structure..."
+    mkdir -p "${COCO_DIR}"/{docker,ansible,packer,configs}
 
     info "Writing environment config..."
     cat > "${COCO_DIR}/.env" << ENVEOF
+# COCO Environment — generated by install.sh
+# $(date)
+
 SECRET_KEY=${SECRET_KEY}
-PROXMOX_HOST=${PROXMOX_HOST}
-PROXMOX_USER=${PROXMOX_USER}
-PROXMOX_PASSWORD=${PROXMOX_PASSWORD}
-PROXMOX_NODE=pve
+
 COCO_IP=${COCO_IP}
 COCO_PORT=${COCO_PORT}
-GAME_BRIDGE=br-game
-GAME_NETWORK=10.10.0.0/16
-AD_VLAN=10
-WEBAPP_VLAN=20
-DB_VLAN=30
+
+PVE_HOSTNAME=${PVE_HOSTNAME}
+PVE_NODE=${PVE_HOSTNAME}
+
+# Game network is configured via COCO Web-GUI, not here.
 ENVEOF
     chmod 600 "${COCO_DIR}/.env"
-    success "Config written to ${COCO_DIR}/.env (permissions: 600)"
+    success "Config written to ${COCO_DIR}/.env"
+
+    info "Cloning COCO repository..."
+    if [[ ! -d "${COCO_DIR}/.git" ]]; then
+        git clone https://github.com/Tox1cfnbr7/coco.git "${COCO_DIR}/repo" >> "$LOG_FILE" 2>&1
+    fi
+    success "Repository cloned to ${COCO_DIR}/repo"
 }
 
+# ── Done ───────────────────────────────────────────────────
 print_done() {
     echo ""
     echo -e "${GREEN}"
     cat << 'DONE'
-  ────────────────────────────────────────────
-   Installation complete.
-  ────────────────────────────────────────────
+  ────────────────────────────────────────────────
+   COCO installation complete.
+   A reboot is required to activate Proxmox VE.
+  ────────────────────────────────────────────────
 DONE
     echo -e "${RESET}"
-    echo -e "  Web-GUI    :  ${CYAN}http://${COCO_IP}:${COCO_PORT}${RESET}"
-    echo -e "  Guacamole  :  ${CYAN}http://${COCO_IP}:8443${RESET}"
-    echo -e "  Config     :  ${COCO_DIR}/.env"
-    echo -e "  Logs       :  ${LOG_FILE}"
+    echo -e "  After reboot:"
+    echo -e "  Proxmox GUI  :  ${CYAN}https://${COCO_IP}:8006${RESET}"
+    echo -e "  COCO Web-GUI :  ${CYAN}http://${COCO_IP}:${COCO_PORT}${RESET}"
+    echo -e "  Guacamole    :  ${CYAN}http://${COCO_IP}:8443${RESET}"
+    echo -e "  Config       :  ${COCO_DIR}/.env"
+    echo -e "  Logs         :  ${LOG_FILE}"
     echo ""
-    echo -e "  ${YELLOW}Next step:${RESET}"
-    echo -e "  cd ${COCO_DIR} && docker compose up -d"
+    divider
+    read -rp "  Reboot now? [y/N]: " reboot_now
+    if [[ "${reboot_now,,}" == "y" ]]; then
+        info "Rebooting..."
+        reboot
+    else
+        warn "Remember to reboot before using Proxmox VE."
+    fi
     echo ""
 }
 
+# ── Main ───────────────────────────────────────────────────
 main() {
     mkdir -p "$(dirname "$LOG_FILE")"
     print_logo
     check_root
     check_os
-    check_resources
-    prompt_config
-    install_dependencies
-    setup_network
-    setup_coco_dir
+    collect_config
+    install_proxmox
+    install_kvm
+    install_docker
+    install_ansible
+    install_packer
+    setup_coco
     print_done
 }
 

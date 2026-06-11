@@ -160,14 +160,22 @@ Types: deb
 URIs: http://download.proxmox.com/debian/pve
 Suites: trixie
 Components: pve-no-subscription
-Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+Signed-By: /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
 REPOEOF
     success "Repository configured"
 
     info "Downloading Proxmox GPG key (Trixie)..."
-    wget -q https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
-        -O /usr/share/keyrings/proxmox-archive-keyring.gpg
+    wget --no-check-certificate -q \
+        https://download.proxmox.com/debian/proxmox-release-trixie.gpg \
+        -O /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
     success "GPG key installed"
+
+    info "Removing enterprise repository if present..."
+    rm -f /etc/apt/sources.list.d/pve-enterprise.list
+    rm -f /etc/apt/sources.list.d/ceph.list
+    find /etc/apt/sources.list.d/ -name "*.sources" \
+        -exec grep -l "enterprise.proxmox.com" {} \; | xargs rm -f 2>/dev/null || true
+    success "Enterprise repository removed"
 
     info "Updating package index and upgrading base system..."
     apt-get update -qq >> "$LOG_FILE" 2>&1

@@ -200,25 +200,20 @@ REPOEOF
     success "os-prober removed"
 }
 
-# ── KVM / libvirt ──────────────────────────────────────────
-install_kvm() {
-    step "Installing KVM / libvirt (nested hypervisor)"
-
-    info "Installing packages..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        qemu-kvm libvirt-daemon-system libvirt-clients \
-        virtinst bridge-utils virt-manager \
-        >> "$LOG_FILE" 2>&1
-    success "KVM + libvirt installed"
-
-    info "Enabling libvirtd..."
-    systemctl enable --now libvirtd >> "$LOG_FILE" 2>&1
-    success "libvirtd running"
+# ── Post-Proxmox config ────────────────────────────────────
+configure_system() {
+    step "Configuring system"
 
     info "Enabling IP forwarding..."
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-coco.conf
     sysctl -p /etc/sysctl.d/99-coco.conf >> "$LOG_FILE" 2>&1
     success "IP forwarding enabled"
+
+    info "Installing base tools..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        curl wget git vim unzip jq openssl \
+        >> "$LOG_FILE" 2>&1
+    success "Base tools installed"
 }
 
 # ── Docker ─────────────────────────────────────────────────
@@ -338,7 +333,7 @@ main() {
     check_os
     collect_config
     install_proxmox
-    install_kvm
+    configure_system
     install_docker
     install_ansible
     install_packer

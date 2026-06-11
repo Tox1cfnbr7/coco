@@ -194,7 +194,7 @@ REPOEOF
     success "Proxmox VE installed"
 
     info "Setting root password..."
-    echo "root:${PVE_ROOT_PASSWORD}" | chpasswd
+    echo -e "${PVE_ROOT_PASSWORD}\n${PVE_ROOT_PASSWORD}" | passwd root >> "$LOG_FILE" 2>&1
     success "Root password set"
 
     info "Removing Debian default kernel..."

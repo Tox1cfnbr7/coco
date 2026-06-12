@@ -31,6 +31,63 @@ error()   { echo -e "${RED}  [-] $*${RESET}"; log "ERR:  $*"; exit 1; }
 step()    { echo ""; echo -e "  ${BOLD}${CYAN}>> $*${RESET}"; echo ""; }
 divider() { echo -e "  ${DIM}────────────────────────────────────────────────${RESET}"; }
 
+# ── Live spinner ───────────────────────────────────────────
+SPINNER_PID=""
+
+spinner_start() {
+    local msg="$1"
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    (
+        local i=0
+        while true; do
+            printf "\r  ${CYAN}${frames[$i]}${RESET}  %s..." "$msg"
+            i=$(( (i+1) % ${#frames[@]} ))
+            sleep 0.1
+        done
+    ) &
+    SPINNER_PID=$!
+    disown "$SPINNER_PID" 2>/dev/null || true
+}
+
+spinner_stop() {
+    if [[ -n "$SPINNER_PID" ]]; then
+        kill "$SPINNER_PID" 2>/dev/null || true
+        wait "$SPINNER_PID" 2>/dev/null || true
+        SPINNER_PID=""
+        printf "\r\033[K"
+    fi
+}
+
+# Run a command with spinner — shows live progress
+run_step() {
+    local msg="$1"; shift
+    spinner_start "$msg"
+    if "$@" >> "$LOG_FILE" 2>&1; then
+        spinner_stop
+        success "$msg"
+        return 0
+    else
+        spinner_stop
+        warn "$msg failed — check ${LOG_FILE}"
+        return 1
+    fi
+}
+
+# ── Progress bar ───────────────────────────────────────────
+TOTAL_STEPS=17
+CURRENT_STEP=0
+
+progress() {
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    local pct=$(( CURRENT_STEP * 100 / TOTAL_STEPS ))
+    local filled=$(( pct / 5 ))
+    local empty=$(( 20 - filled ))
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    echo -e "  ${DIM}[${bar}] ${pct}% — step ${CURRENT_STEP}/${TOTAL_STEPS}${RESET}"
+}
+
 # ── State management ───────────────────────────────────────
 save_state() { echo "$1" > "$STATE_FILE"; log "STATE: $1"; }
 get_state()  { [[ -f "$STATE_FILE" ]] && cat "$STATE_FILE" || echo "start"; }
@@ -63,6 +120,7 @@ check_root() {
 
 check_os() {
     step "System check"
+    progress
     [[ -f /etc/debian_version ]] || error "Requires Debian 13."
     success "OS: Debian $(cat /etc/debian_version)"
 
@@ -86,6 +144,7 @@ check_os() {
 # ── Config ─────────────────────────────────────────────────
 collect_config() {
     step "Configuration"
+    progress
     echo -e "  ${DIM}Press Enter to accept defaults.${RESET}"
     echo ""
 
@@ -122,6 +181,7 @@ collect_config() {
 
     echo ""
     step "Summary"
+    progress
     divider
     echo -e "  Proxmox GUI  :  ${CYAN}https://${COCO_IP}:8006${RESET}"
     echo -e "  COCO Web-GUI :  ${CYAN}https://${COCO_IP}:443${RESET}"
@@ -147,30 +207,36 @@ CFGEOF
 
 load_config() {
     [[ -f "${COCO_DIR}/.install-config" ]] \
-        || error "Config file not found. Run install.sh from scratch."
+        || error "Config not found at ${COCO_DIR}/.install-config — run install.sh from scratch."
+    # Export every variable so subshells and here-docs can see them
+    set -a
     source "${COCO_DIR}/.install-config"
+    set +a
+    info "Config loaded — resuming as ${COCO_IP}"
 }
 
 # ── Bootstrap ──────────────────────────────────────────────
 install_bootstrap() {
-    done_state "bootstrap" && { success "Bootstrap: already done"; return; }
+    done_state "bootstrap" && { success "Bootstrap: already done"; progress; return; }
     step "Installing bootstrap dependencies"
+    progress
 
-    apt-get update -qq >> "$LOG_FILE" 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        curl wget git vim unzip jq openssl \
-        ca-certificates gnupg lsb-release \
-        procps iproute2 net-tools \
-        python3 python3-pip python3-venv \
-        >> "$LOG_FILE" 2>&1
+    run_step "Updating package index" apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive run_step "Installing base tools" \
+        apt-get install -y -qq \
+            curl wget git vim unzip jq openssl \
+            ca-certificates gnupg lsb-release \
+            procps iproute2 net-tools \
+            python3 python3-pip python3-venv
     success "Bootstrap dependencies installed"
     save_state "bootstrap"
 }
 
 # ── Proxmox VE ─────────────────────────────────────────────
 install_proxmox() {
-    done_state "proxmox" && { success "Proxmox VE: already installed"; return; }
+    done_state "proxmox" && { success "Proxmox VE: already installed"; progress; return; }
     step "Installing Proxmox VE 9"
+    progress
 
     info "Setting hostname to ${PVE_HOSTNAME}..."
     hostnamectl set-hostname "${PVE_HOSTNAME}"
@@ -293,22 +359,26 @@ remove_resume_service() {
 
 # ── Reboot checkpoint ──────────────────────────────────────
 reboot_for_kernel() {
-    done_state "rebooted" && { success "Kernel reboot: already done"; return; }
+    done_state "rebooted" && { success "Kernel reboot: already done"; progress; return; }
 
     info "Copying installer to permanent location..."
-    cp "$(realpath "$0")" "${COCO_DIR}/install.sh"
+    cp "$(realpath "$0")" "${COCO_DIR}/install.sh" 2>/dev/null || \
+        cp "$0" "${COCO_DIR}/install.sh" 2>/dev/null || true
     chmod +x "${COCO_DIR}/install.sh"
-    success "Installer saved to ${COCO_DIR}/install.sh"
 
     setup_resume_service
+    progress
 
     echo ""
     echo -e "${YELLOW}"
     cat << 'RBT'
   ────────────────────────────────────────────────
    Reboot required to activate Proxmox VE kernel.
-   Installation will resume automatically.
-   Watch progress: journalctl -fu coco-install-resume
+
+   Installation resumes AUTOMATICALLY after reboot.
+   Watch live progress after reboot:
+
+   journalctl -fu coco-install-resume
   ────────────────────────────────────────────────
 RBT
     echo -e "${RESET}"
@@ -321,8 +391,9 @@ RBT
 
 # ── Post-reboot: system config ─────────────────────────────
 configure_system() {
-    done_state "sysconfig" && { success "System config: already done"; return; }
+    done_state "sysconfig" && { success "System config: already done"; progress; return; }
     step "Configuring system"
+    progress
 
     local kernel
     kernel=$(uname -r)
@@ -345,8 +416,9 @@ configure_system() {
 
 # ── Python / FastAPI backend ───────────────────────────────
 install_backend() {
-    done_state "backend" && { success "Backend: already installed"; return; }
+    done_state "backend" && { success "Backend: already installed"; progress; return; }
     step "Installing Python + FastAPI backend"
+    progress
 
     info "Installing Python packages..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
@@ -380,8 +452,9 @@ install_backend() {
 
 # ── PostgreSQL ─────────────────────────────────────────────
 install_postgres() {
-    done_state "postgres" && { success "PostgreSQL: already installed"; return; }
+    done_state "postgres" && { success "PostgreSQL: already installed"; progress; return; }
     step "Installing PostgreSQL"
+    progress
 
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
         postgresql postgresql-client \
@@ -409,8 +482,9 @@ install_postgres() {
 
 # ── Redis ──────────────────────────────────────────────────
 install_redis() {
-    done_state "redis" && { success "Redis: already installed"; return; }
+    done_state "redis" && { success "Redis: already installed"; progress; return; }
     step "Installing Redis"
+    progress
 
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server \
         >> "$LOG_FILE" 2>&1
@@ -422,8 +496,9 @@ install_redis() {
 
 # ── Guacamole ──────────────────────────────────────────────
 install_guacamole() {
-    done_state "guacamole" && { success "Guacamole: already installed"; return; }
+    done_state "guacamole" && { success "Guacamole: already installed"; progress; return; }
     step "Installing Apache Guacamole (browser-based terminal)"
+    progress
 
     local GUAC_VER="1.5.5"
     local GUAC_URL="https://downloads.apache.org/guacamole/${GUAC_VER}/source/guacamole-server-${GUAC_VER}.tar.gz"
@@ -503,8 +578,9 @@ GUACXML
 
 
 install_ansible() {
-    done_state "ansible" && { success "Ansible: already installed"; return; }
+    done_state "ansible" && { success "Ansible: already installed"; progress; return; }
     step "Installing Ansible"
+    progress
 
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
         ansible ansible-core \
@@ -516,8 +592,9 @@ install_ansible() {
 
 # ── Packer ─────────────────────────────────────────────────
 install_packer() {
-    done_state "packer" && { success "Packer: already installed"; return; }
+    done_state "packer" && { success "Packer: already installed"; progress; return; }
     step "Installing Packer"
+    progress
 
     local PACKER_VER="1.11.0"
     wget -q \
@@ -533,8 +610,9 @@ install_packer() {
 
 # ── Node.js ────────────────────────────────────────────────
 install_node() {
-    done_state "node" && { success "Node.js: already installed"; return; }
+    done_state "node" && { success "Node.js: already installed"; progress; return; }
     step "Installing Node.js"
+    progress
 
     info "Adding Node.js 22 LTS repository..."
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >> "$LOG_FILE" 2>&1
@@ -546,8 +624,9 @@ install_node() {
 
 # ── Frontend build ──────────────────────────────────────────
 build_frontend() {
-    done_state "frontend" && { success "Frontend: already built"; return; }
+    done_state "frontend" && { success "Frontend: already built"; progress; return; }
     step "Building React frontend"
+    progress
 
     local frontend_dir="${COCO_DIR}/repo/web/frontend"
 
@@ -570,8 +649,9 @@ build_frontend() {
 
 # ── Deploy COCO service ─────────────────────────────────────
 deploy_service() {
-    done_state "service" && { success "COCO service: already deployed"; return; }
+    done_state "service" && { success "COCO service: already deployed"; progress; return; }
     step "Deploying COCO systemd service"
+    progress
 
     local service_src="${COCO_DIR}/repo/web/backend/coco.service"
 
@@ -622,8 +702,9 @@ SVCEOF
 }
 # ── DB Schema init ─────────────────────────────────────────
 init_database() {
-    done_state "dbinit" && { success "Database schema: already initialized"; return; }
+    done_state "dbinit" && { success "Database schema: already initialized"; progress; return; }
     step "Initializing database schema"
+    progress
 
     info "Creating tables..."
     PYTHONPATH="${COCO_DIR}/repo/web/backend" \
@@ -642,8 +723,9 @@ PYEOF
 
 # ── Create admin user ──────────────────────────────────────
 create_admin() {
-    done_state "admin" && { success "Admin user: already created"; return; }
+    done_state "admin" && { success "Admin user: already created"; progress; return; }
     step "Creating admin user"
+    progress
 
     info "Creating admin: ${COCO_ADMIN_EMAIL}..."
     PYTHONPATH="${COCO_DIR}/repo/web/backend" \
@@ -676,8 +758,9 @@ PYEOF
 
 # ── SSL Certificate ────────────────────────────────────────
 setup_ssl() {
-    done_state "ssl" && { success "SSL: already configured"; return; }
+    done_state "ssl" && { success "SSL: already configured"; progress; return; }
     step "Generating SSL certificate"
+    progress
 
     mkdir -p "${COCO_DIR}/ssl"
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
@@ -693,8 +776,9 @@ setup_ssl() {
 
 # ── COCO directories + env ─────────────────────────────────
 setup_coco() {
-    done_state "coco" && { success "COCO dirs: already set up"; return; }
+    done_state "coco" && { success "COCO dirs: already set up"; progress; return; }
     step "Setting up COCO"
+    progress
 
     mkdir -p "${COCO_DIR}"/{backend,frontend,ansible,packer,ssl,logs}
 

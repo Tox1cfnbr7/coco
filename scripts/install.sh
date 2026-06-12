@@ -420,7 +420,88 @@ install_redis() {
     save_state "redis"
 }
 
-# ── Ansible ────────────────────────────────────────────────
+# ── Guacamole ──────────────────────────────────────────────
+install_guacamole() {
+    done_state "guacamole" && { success "Guacamole: already installed"; return; }
+    step "Installing Apache Guacamole (browser-based terminal)"
+
+    local GUAC_VER="1.5.5"
+    local GUAC_URL="https://downloads.apache.org/guacamole/${GUAC_VER}/source/guacamole-server-${GUAC_VER}.tar.gz"
+
+    info "Installing build dependencies..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        build-essential libcairo2-dev libjpeg62-turbo-dev libpng-dev \
+        libtool-bin libossp-uuid-dev libavcodec-dev libavformat-dev \
+        libavutil-dev libswscale-dev freerdp2-dev libpango1.0-dev \
+        libssh2-1-dev libtelnet-dev libvncserver-dev libwebsockets-dev \
+        libpulse-dev libssl-dev libvorbis-dev libwebp-dev \
+        tomcat10 tomcat10-admin \
+        >> "$LOG_FILE" 2>&1
+    success "Build dependencies installed"
+
+    info "Downloading guacamole-server ${GUAC_VER}..."
+    wget -q "${GUAC_URL}" -O /tmp/guacamole-server.tar.gz >> "$LOG_FILE" 2>&1
+    tar -xzf /tmp/guacamole-server.tar.gz -C /tmp >> "$LOG_FILE" 2>&1
+
+    info "Compiling guacd (this takes a few minutes)..."
+    cd "/tmp/guacamole-server-${GUAC_VER}"
+    ./configure --with-init-dir=/etc/init.d >> "$LOG_FILE" 2>&1
+    make -j"$(nproc)" >> "$LOG_FILE" 2>&1
+    make install >> "$LOG_FILE" 2>&1
+    ldconfig >> "$LOG_FILE" 2>&1
+    cd /
+    rm -rf /tmp/guacamole-server*
+    success "guacd compiled and installed"
+
+    info "Downloading Guacamole web app..."
+    local WAR_URL="https://downloads.apache.org/guacamole/${GUAC_VER}/binary/guacamole-${GUAC_VER}.war"
+    wget -q "${WAR_URL}" -O /var/lib/tomcat10/webapps/guacamole.war >> "$LOG_FILE" 2>&1
+    success "Guacamole WAR deployed to Tomcat"
+
+    info "Configuring Guacamole..."
+    mkdir -p /etc/guacamole/{extensions,lib}
+    mkdir -p /usr/share/tomcat10/.guacamole
+
+    # Main config
+    cat > /etc/guacamole/guacamole.properties << GUACPROP
+guacd-hostname: localhost
+guacd-port: 4822
+auth-provider: net.sourceforge.guacamole.net.basic.BasicFileAuthenticationProvider
+basic-user-mapping: /etc/guacamole/user-mapping.xml
+GUACPROP
+
+    # Symlink for Tomcat
+    ln -sf /etc/guacamole /usr/share/tomcat10/.guacamole
+
+    # Generate guacd user mapping — will be updated dynamically by COCO
+    cat > /etc/guacamole/user-mapping.xml << 'GUACXML'
+<user-mapping>
+    <authorize username="coco" password="coco_guac_placeholder">
+    </authorize>
+</user-mapping>
+GUACXML
+
+    chmod 640 /etc/guacamole/user-mapping.xml
+    chown root:tomcat /etc/guacamole/user-mapping.xml
+
+    info "Enabling guacd and Tomcat services..."
+    systemctl daemon-reload >> "$LOG_FILE" 2>&1
+    systemctl enable --now guacd >> "$LOG_FILE" 2>&1
+    systemctl enable --now tomcat10 >> "$LOG_FILE" 2>&1
+
+    # Save guac token to env
+    local guac_pass
+    guac_pass=$(openssl rand -hex 16)
+    echo "GUACAMOLE_URL=http://localhost:8080/guacamole" >> "${COCO_DIR}/.env"
+    echo "GUACAMOLE_PASS=${guac_pass}" >> "${COCO_DIR}/.env"
+
+    success "Guacamole running at http://localhost:8080/guacamole"
+    success "Access via COCO proxy at https://${COCO_IP}/terminal"
+
+    save_state "guacamole"
+}
+
+
 install_ansible() {
     done_state "ansible" && { success "Ansible: already installed"; return; }
     step "Installing Ansible"
@@ -682,6 +763,7 @@ run_all() {
     install_backend
     install_postgres
     install_redis
+    install_guacamole
     install_ansible
     install_packer
     install_node

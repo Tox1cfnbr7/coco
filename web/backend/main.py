@@ -11,7 +11,7 @@ import os
 
 from core.config import get_settings
 from core.database import engine, Base
-from routes import auth, games, admin
+from routes import auth, games, admin, guacamole
 
 settings = get_settings()
 
@@ -63,6 +63,7 @@ async def security_headers(request: Request, call_next):
 app.include_router(auth.router, prefix="/api")
 app.include_router(games.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
+app.include_router(guacamole.router)
 
 
 @app.get("/api/health")

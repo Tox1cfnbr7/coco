@@ -9,7 +9,7 @@
 set -euo pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-COCO_VERSION="0.5.0"
+COCO_VERSION="0.6.0"
 COCO_DIR="/opt/coco"
 LOG_FILE="/var/log/coco-install.log"
 STATE_FILE="/var/lib/coco-install.state"
@@ -110,6 +110,14 @@ collect_config() {
     [[ ${#PVE_ROOT_PASSWORD} -ge 8 ]] \
         || error "Password must be at least 8 characters."
 
+    echo ""
+    read -rp "  $(echo -e "${BOLD}COCO admin email${RESET}") [admin@coco.local]: " COCO_ADMIN_EMAIL
+    COCO_ADMIN_EMAIL=${COCO_ADMIN_EMAIL:-admin@coco.local}
+
+    read -rsp "  $(echo -e "${BOLD}COCO admin password${RESET}") (min 10 chars): " COCO_ADMIN_PASSWORD
+    echo ""
+    [[ ${#COCO_ADMIN_PASSWORD} -ge 10 ]] || error "Admin password must be at least 10 characters."
+
     SECRET_KEY=$(openssl rand -hex 32)
 
     echo ""
@@ -130,6 +138,8 @@ collect_config() {
 COCO_IP="${COCO_IP}"
 PVE_HOSTNAME="${PVE_HOSTNAME}"
 PVE_ROOT_PASSWORD="${PVE_ROOT_PASSWORD}"
+COCO_ADMIN_EMAIL="${COCO_ADMIN_EMAIL}"
+COCO_ADMIN_PASSWORD="${COCO_ADMIN_PASSWORD}"
 SECRET_KEY="${SECRET_KEY}"
 CFGEOF
     chmod 600 "${COCO_DIR}/.install-config"
@@ -388,6 +398,10 @@ install_postgres() {
 
     echo "DB_URL=postgresql://coco:${db_pass}@localhost/coco" \
         >> "${COCO_DIR}/.env"
+    echo "DATABASE_URL=postgresql://coco:${db_pass}@localhost/coco" \
+        >> "${COCO_DIR}/.env"
+    echo "REDIS_URL=redis://localhost:6379" \
+        >> "${COCO_DIR}/.env"
     success "PostgreSQL ready — database: coco"
 
     save_state "postgres"
@@ -525,6 +539,61 @@ SVCEOF
 
     save_state "service"
 }
+# ── DB Schema init ─────────────────────────────────────────
+init_database() {
+    done_state "dbinit" && { success "Database schema: already initialized"; return; }
+    step "Initializing database schema"
+
+    info "Creating tables..."
+    PYTHONPATH="${COCO_DIR}/repo/web/backend" \
+    "${COCO_DIR}/venv/bin/python3" << 'PYEOF'
+import sys
+sys.path.insert(0, '/opt/coco/repo/web/backend')
+from core.database import engine, Base
+from models.user import User
+from models.game import Game, Team, VM, GameEvent, AuditLog
+Base.metadata.create_all(bind=engine)
+print("Tables created.")
+PYEOF
+    success "Database schema initialized"
+    save_state "dbinit"
+}
+
+# ── Create admin user ──────────────────────────────────────
+create_admin() {
+    done_state "admin" && { success "Admin user: already created"; return; }
+    step "Creating admin user"
+
+    info "Creating admin: ${COCO_ADMIN_EMAIL}..."
+    PYTHONPATH="${COCO_DIR}/repo/web/backend" \
+    "${COCO_DIR}/venv/bin/python3" << PYEOF
+import sys
+sys.path.insert(0, '/opt/coco/repo/web/backend')
+from core.database import SessionLocal
+from core.security import hash_password
+from models.user import User, UserRole
+db = SessionLocal()
+existing = db.query(User).filter(User.email == '${COCO_ADMIN_EMAIL}').first()
+if existing:
+    print("Admin already exists.")
+else:
+    admin = User(
+        email='${COCO_ADMIN_EMAIL}',
+        username='admin',
+        hashed_password=hash_password('${COCO_ADMIN_PASSWORD}'),
+        role=UserRole.admin,
+        is_active=True,
+    )
+    db.add(admin)
+    db.commit()
+    print("Admin created.")
+db.close()
+PYEOF
+    success "Admin user ready: ${COCO_ADMIN_EMAIL}"
+    save_state "admin"
+}
+
+# ── SSL Certificate ────────────────────────────────────────
 setup_ssl() {
     done_state "ssl" && { success "SSL: already configured"; return; }
     step "Generating SSL certificate"
@@ -588,11 +657,16 @@ print_done() {
   ────────────────────────────────────────────────
 DONE
     echo -e "${RESET}"
-    echo -e "  Proxmox GUI  :  ${CYAN}https://${COCO_IP}:8006${RESET}"
-    echo -e "  COCO Web-GUI :  ${CYAN}https://${COCO_IP}${RESET}"
-    echo -e "  Config       :  ${COCO_DIR}/.env"
-    echo -e "  Logs         :  ${LOG_FILE}"
-    echo -e "  Service      :  systemctl status coco"
+    echo -e "  ${BOLD}COCO Web-GUI${RESET}  :  ${CYAN}https://${COCO_IP}${RESET}"
+    echo -e "  ${BOLD}Proxmox GUI${RESET}   :  ${CYAN}https://${COCO_IP}:8006${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Admin login${RESET}"
+    echo -e "  Email     :  ${COCO_ADMIN_EMAIL}"
+    echo -e "  Password  :  (the one you set during install)"
+    echo ""
+    echo -e "  ${BOLD}Service${RESET}       :  systemctl status coco"
+    echo -e "  ${BOLD}Logs${RESET}          :  journalctl -xeu coco"
+    echo -e "  ${BOLD}Config${RESET}        :  ${COCO_DIR}/.env"
     echo ""
     divider
     echo ""
@@ -604,8 +678,8 @@ run_all() {
     install_proxmox
     reboot_for_kernel
     configure_system
-    setup_coco           # clone repo first so requirements.txt is available
-    install_backend      # uses repo/web/backend/requirements.txt
+    setup_coco
+    install_backend
     install_postgres
     install_redis
     install_ansible
@@ -613,6 +687,8 @@ run_all() {
     install_node
     setup_ssl
     build_frontend
+    init_database
+    create_admin
     deploy_service
     print_done
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.9.2
+#   Installer v0.9.3
 #   Target:  Debian 13 (Trixie) + Proxmox VE 9
 #   Stack:   FastAPI + React + PostgreSQL + Redis + Guacamole
 #   Repo:    https://github.com/Tox1cfnbr7/coco
@@ -12,8 +12,8 @@ IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Versioning ─────────────────────────────────────────────
-COCO_INSTALLER_VERSION="0.9.2"
-COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.2}"
+COCO_INSTALLER_VERSION="0.9.3"
+COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.3}"
 COCO_REPO_URL="${COCO_REPO_URL:-https://github.com/Tox1cfnbr7/coco.git}"
 COCO_REPO_BRANCH="${COCO_REPO_BRANCH:-main}"
 COCO_INSTALLER_RAW_URL="${COCO_INSTALLER_RAW_URL:-https://raw.githubusercontent.com/Tox1cfnbr7/coco/main/scripts/install.sh}"
@@ -868,6 +868,34 @@ download_with_fallback() {
 }
 
 
+apt_package_available() {
+  local pkg="$1"
+  apt-cache show "$pkg" >/dev/null 2>&1
+}
+
+select_first_available_package() {
+  local pkg
+  for pkg in "$@"; do
+    if apt_package_available "$pkg"; then
+      printf '%s' "$pkg"
+      return 0
+    fi
+  done
+  return 1
+}
+
+add_available_package() {
+  local __array_name="$1"; shift
+  local pkg
+  pkg="$(select_first_available_package "$@" || true)"
+  if [[ -n "$pkg" ]]; then
+    eval "$__array_name+=(\"$pkg\")"
+    return 0
+  fi
+  return 1
+}
+
+
 ensure_guacd_service() {
   systemctl daemon-reload >/dev/null 2>&1 || true
 
@@ -900,26 +928,56 @@ EOF
 }
 
 step_guacamole() {
-  # Build dependencies
-  local common_deps=(
-    build-essential libcairo2-dev libpng-dev libtool-bin libossp-uuid-dev
+  # Build dependencies. Debian 13/Trixie removed freerdp2-dev; freerdp3-dev is
+  # the correct package there. The installer therefore resolves package names
+  # before apt-get install instead of trying a known-bad package first.
+  run_cmd "Updating package index before Guacamole dependencies" apt-get update -qq
+
+  local deps=()
+  local pkg missing=()
+  local required_deps=(
+    build-essential make gcc g++ pkg-config autoconf automake
+    libcairo2-dev libpng-dev libtool-bin uuid-dev
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
     libpango1.0-dev libssh2-1-dev libtelnet-dev libvncserver-dev
     libwebsockets-dev libpulse-dev libssl-dev libvorbis-dev libwebp-dev
     tomcat10 tomcat10-admin wget curl
   )
-  set +e
-  env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    "${common_deps[@]}" libjpeg62-turbo-dev freerdp2-dev >> "$LOG_FILE" 2>&1
-  local rc=$?
-  set -e
-  if [[ $rc -ne 0 ]]; then
-    warn "freerdp2 not available — trying freerdp3"
-    run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive \
-      apt-get install -y -qq "${common_deps[@]}" libjpeg-dev freerdp3-dev
-  else
-    success "Guacamole build dependencies installed"
+  local optional_deps=(
+    libossp-uuid-dev
+  )
+
+  for pkg in "${required_deps[@]}"; do
+    if apt_package_available "$pkg"; then
+      deps+=("$pkg")
+    else
+      missing+=("$pkg")
+    fi
+  done
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    fail "Required Guacamole build packages not available in apt: ${missing[*]}"
   fi
+
+  for pkg in "${optional_deps[@]}"; do
+    if apt_package_available "$pkg"; then
+      deps+=("$pkg")
+    else
+      warn "Optional Guacamole package not available: $pkg"
+    fi
+  done
+
+  add_available_package deps libjpeg62-turbo-dev libjpeg-dev \
+    || fail "No JPEG development package available (tried libjpeg62-turbo-dev, libjpeg-dev)"
+
+  if add_available_package deps freerdp3-dev freerdp2-dev; then
+    success "FreeRDP development package selected"
+  else
+    warn "No FreeRDP development package found — guacd will build without RDP support"
+  fi
+
+  run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y -qq "${deps[@]}"
 
   # Build guacd from source
   local tar_file="/tmp/guacamole-server-${GUAC_VERSION}.tar.gz"

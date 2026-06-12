@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = "/opt/coco/.env"
         case_sensitive = False
+        extra = "ignore"
 
 
 @lru_cache()

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.8.0
+#   Installer v0.9.0
 #   Target:  Debian 13 (Trixie) + Proxmox VE 9
 #   Stack:   FastAPI + React + PostgreSQL + Redis + Guacamole
 #   Repo:    https://github.com/Tox1cfnbr7/coco
@@ -12,8 +12,8 @@ IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Versioning ─────────────────────────────────────────────
-COCO_INSTALLER_VERSION="0.8.0"
-COCO_APP_VERSION="${COCO_APP_VERSION:-0.8.0}"
+COCO_INSTALLER_VERSION="0.9.0"
+COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.0}"
 COCO_REPO_URL="${COCO_REPO_URL:-https://github.com/Tox1cfnbr7/coco.git}"
 COCO_REPO_BRANCH="${COCO_REPO_BRANCH:-main}"
 COCO_INSTALLER_RAW_URL="${COCO_INSTALLER_RAW_URL:-https://raw.githubusercontent.com/Tox1cfnbr7/coco/main/scripts/install.sh}"
@@ -38,7 +38,7 @@ COCO_RESUME_SERVICE="/etc/systemd/system/coco-install-resume.service"
 # ── Tool versions ──────────────────────────────────────────
 PACKER_VERSION="${PACKER_VERSION:-1.11.0}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
-GUAC_VERSION="${GUAC_VERSION:-1.5.5}"
+GUAC_VERSION="${GUAC_VERSION:-1.6.0}"
 
 # ── Flags ──────────────────────────────────────────────────
 VERBOSE=0
@@ -606,10 +606,108 @@ EOF
   run_cmd "Applying sysctl" sysctl -p /etc/sysctl.d/99-coco.conf
 }
 
+
+write_fallback_requirements() {
+  local req="$1"
+  mkdir -p "$(dirname "$req")"
+  cat > "$req" <<'REQEOF'
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy==2.0.35
+alembic==1.13.3
+psycopg2-binary>=2.9.12
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+python-multipart==0.0.9
+pydantic-settings==2.5.2
+httpx==0.27.2
+redis==5.1.0
+slowapi==0.1.9
+python-dotenv==1.0.1
+REQEOF
+}
+
+normalise_requirements() {
+  local src="$1" dst="$2"
+  if [[ ! -f "$src" ]]; then
+    warn "requirements.txt not found — writing known-good fallback requirements"
+    write_fallback_requirements "$src"
+  fi
+
+  python3 - "$src" "$dst" <<'PYREQ'
+from pathlib import Path
+import re, sys
+src, dst = map(Path, sys.argv[1:3])
+text = src.read_text(encoding='utf-8', errors='replace')
+text = text.replace('psycopg2-binary==2.9.9', 'psycopg2-binary>=2.9.12')
+text = text.replace('psycopg2-binary==2.9.10', 'psycopg2-binary>=2.9.12')
+text = text.replace('psycopg2-binary==2.9.11', 'psycopg2-binary>=2.9.12')
+raw = []
+for line in text.splitlines():
+    line = line.strip()
+    if not line or line.startswith('#'):
+        continue
+    if ' ' in line and not line.startswith(('-e ', '--')):
+        raw.extend(x for x in re.split(r'\s+', line) if x)
+    else:
+        raw.append(line)
+seen, out = set(), []
+for item in raw:
+    key = re.split(r'[<>=!~]', item, 1)[0].lower()
+    if key in seen:
+        continue
+    seen.add(key)
+    out.append(item)
+if not any(x.lower().startswith('psycopg2-binary') for x in out):
+    out.append('psycopg2-binary>=2.9.12')
+if not any(x.lower().startswith('bcrypt') for x in out):
+    out.append('bcrypt==4.0.1')
+dst.write_text('\n'.join(out) + '\n', encoding='utf-8')
+PYREQ
+}
+
+repair_repo_compat() {
+  local backend frontend req tmp
+  backend="$(backend_dir)"
+  frontend="$(frontend_dir)"
+  req="${backend}/requirements.txt"
+  tmp="${STATE_DIR}/requirements.normalized.txt"
+
+  [[ -d "$backend" ]] || fail "Backend directory not found: $backend"
+  mkdir -p "$STATE_DIR"
+  normalise_requirements "$req" "$tmp"
+  install -m 0644 "$tmp" "$req"
+  success "Python requirements normalised"
+
+  if [[ -f "${backend}/main.py" ]]; then
+    python3 - "${backend}/main.py" "$COCO_APP_VERSION" <<'PYMAIN'
+from pathlib import Path
+import re, sys
+p = Path(sys.argv[1]); version = sys.argv[2]
+s = p.read_text(encoding='utf-8', errors='replace')
+s = re.sub(r'version\s*=\s*["\']0\.[0-9.]+["\']', f'version="{version}"', s)
+s = re.sub(r'"version"\s*:\s*"0\.[0-9.]+"', f'"version": "{version}"', s)
+p.write_text(s, encoding='utf-8')
+PYMAIN
+  fi
+
+  if [[ -f "${frontend}/package.json" ]]; then
+    python3 - "${frontend}/package.json" "$COCO_APP_VERSION" <<'PYPKG' || warn "Could not update frontend package.json version"
+from pathlib import Path
+import json, sys
+p = Path(sys.argv[1]); version = sys.argv[2]
+data = json.loads(p.read_text(encoding='utf-8'))
+data['version'] = version
+p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PYPKG
+  fi
+}
+
+
 step_coco() {
   mkdir -p "$COCO_DIR" "$COCO_SSL_DIR" "${COCO_DIR}/logs"
 
-  # Initialise .env
   cat > "$COCO_ENV_FILE" <<EOF
 # COCO Environment — generated $(date -Is)
 EOF
@@ -633,6 +731,7 @@ EOF
     run_cmd "Cloning COCO repository" \
       git clone --branch "$COCO_REPO_BRANCH" "$COCO_REPO_URL" "$COCO_REPO_DIR"
   else
+    run_cmd_allow_fail "Resetting local repository changes" git -C "$COCO_REPO_DIR" reset --hard
     run_cmd "Updating COCO repository" git -C "$COCO_REPO_DIR" pull --ff-only origin "$COCO_REPO_BRANCH"
   fi
 
@@ -644,30 +743,41 @@ EOF
 
   env_set COCO_BACKEND_DIR  "$backend"
   env_set COCO_FRONTEND_DIR "$frontend"
+  repair_repo_compat
   write_version_file
   success "COCO repository ready at $COCO_REPO_DIR"
 }
 
 step_backend() {
-  local backend req
+  local backend req req_install
   backend="$(backend_dir)"
   [[ -d "$backend" ]] || fail "Backend dir missing: $backend"
 
   run_cmd "Installing Python build dependencies" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    python3 python3-pip python3-venv python3-dev build-essential libssl-dev libffi-dev libpq-dev
+    python3 python3-pip python3-venv python3-dev build-essential libssl-dev libffi-dev libpq-dev pkg-config
 
-  run_cmd "Creating Python venv" python3 -m venv "$COCO_VENV_DIR"
-  run_cmd "Upgrading pip" "${COCO_VENV_DIR}/bin/pip" install --quiet --upgrade pip setuptools wheel
+  if [[ ! -x "$COCO_VENV_DIR/bin/python3" ]]; then
+    run_cmd "Creating Python venv" python3 -m venv "$COCO_VENV_DIR"
+  else
+    success "Python venv already exists"
+  fi
+  run_cmd "Upgrading pip" "$COCO_VENV_DIR/bin/pip" install --quiet --upgrade pip setuptools wheel
 
   req="${backend}/requirements.txt"
-  if [[ -f "$req" ]]; then
-    run_cmd "Installing Python requirements" "${COCO_VENV_DIR}/bin/pip" install --quiet -r "$req"
-  else
-    warn "requirements.txt not found — installing fallback packages"
-    run_cmd "Installing fallback Python packages" "${COCO_VENV_DIR}/bin/pip" install --quiet \
-      fastapi 'uvicorn[standard]' sqlalchemy alembic psycopg2-binary \
-      'python-jose[cryptography]' 'passlib[bcrypt]' python-multipart \
-      httpx pydantic-settings redis slowapi python-dotenv
+  req_install="${STATE_DIR}/requirements.install.txt"
+  normalise_requirements "$req" "$req_install"
+
+  run_cmd "Installing Python requirements" "$COCO_VENV_DIR/bin/pip" install --quiet --prefer-binary -r "$req_install"
+
+  run_cmd "Verifying critical Python packages" "$COCO_VENV_DIR/bin/python3" - <<'PYVERIFY'
+import importlib
+for name in ('fastapi', 'uvicorn', 'sqlalchemy', 'psycopg2', 'redis', 'jose', 'passlib'):
+    importlib.import_module(name)
+print('critical imports ok')
+PYVERIFY
+
+  if find "$backend" -name '*.py' -print -quit | grep -q .; then
+    run_cmd "Checking backend Python syntax" "$COCO_VENV_DIR/bin/python3" -m compileall -q "$backend"
   fi
 }
 
@@ -680,7 +790,8 @@ step_postgres() {
   [[ -z "$db_pass" ]] && db_pass="$(openssl rand -hex 24)"
 
   local sql
-  sql="$(mktemp)"
+  sql="${STATE_DIR}/coco-postgres.sql"
+  umask 077
   cat > "$sql" <<EOF
 DO \$\$
 BEGIN
@@ -694,7 +805,10 @@ END
 SELECT 'CREATE DATABASE coco OWNER coco'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'coco')\gexec
 ALTER DATABASE coco OWNER TO coco;
+GRANT ALL PRIVILEGES ON DATABASE coco TO coco;
 EOF
+  chown postgres:postgres "$sql"
+  chmod 600 "$sql"
   run_cmd "Configuring COCO database" runuser -u postgres -- psql -v ON_ERROR_STOP=1 -f "$sql"
   rm -f "$sql"
 
@@ -1011,6 +1125,40 @@ DONE
   divider
 }
 
+
+heal_state_markers() {
+  if is_done coco && [[ ! -d "$COCO_REPO_DIR/.git" ]]; then
+    warn "Removing stale coco marker — repository missing"
+    rm -f "${STEP_DIR}/coco.done"
+  fi
+  if is_done backend; then
+    if [[ ! -x "$COCO_VENV_DIR/bin/python3" ]] || ! "$COCO_VENV_DIR/bin/python3" - <<'PYCHECK' >/dev/null 2>&1
+import importlib
+for name in ('fastapi','uvicorn','sqlalchemy','psycopg2'):
+    importlib.import_module(name)
+PYCHECK
+    then
+      warn "Removing stale backend marker — venv/packages incomplete"
+      rm -f "${STEP_DIR}/backend.done"
+    fi
+  fi
+  if is_done postgres; then
+    if ! systemctl is-active --quiet postgresql || ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='coco'" 2>/dev/null | grep -qx 1; then
+      warn "Removing stale postgres marker — database missing or service inactive"
+      rm -f "${STEP_DIR}/postgres.done"
+    fi
+  fi
+  if is_done redis && ! systemctl is-active --quiet redis-server; then
+    warn "Removing stale redis marker — service inactive"
+    rm -f "${STEP_DIR}/redis.done"
+  fi
+  if is_done ssl && { [[ ! -f "${COCO_SSL_DIR}/coco.crt" ]] || [[ ! -f "${COCO_SSL_DIR}/coco.key" ]]; }; then
+    warn "Removing stale ssl marker — certificate missing"
+    rm -f "${STEP_DIR}/ssl.done"
+  fi
+}
+
+
 # ── Main ───────────────────────────────────────────────────
 run_all() {
   with_step bootstrap      "Installing bootstrap dependencies"          step_bootstrap
@@ -1042,12 +1190,14 @@ main() {
   if [[ "$RESUME" == "1" ]]; then
     info "Resuming after reboot"
     load_install_config
+    heal_state_markers
     run_all
     return 0
   fi
 
   check_os
   collect_config
+  heal_state_markers
   run_all
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.9.3
+#   Installer v0.9.5
 #   Target:  Debian 13 (Trixie) + Proxmox VE 9
 #   Stack:   FastAPI + React + PostgreSQL + Redis + Guacamole
 #   Repo:    https://github.com/Tox1cfnbr7/coco
@@ -12,8 +12,8 @@ IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Versioning ─────────────────────────────────────────────
-COCO_INSTALLER_VERSION="0.9.4"
-COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.4}"
+COCO_INSTALLER_VERSION="0.9.5"
+COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.5}"
 COCO_REPO_URL="${COCO_REPO_URL:-https://github.com/Tox1cfnbr7/coco.git}"
 COCO_REPO_BRANCH="${COCO_REPO_BRANCH:-main}"
 COCO_INSTALLER_RAW_URL="${COCO_INSTALLER_RAW_URL:-https://raw.githubusercontent.com/Tox1cfnbr7/coco/main/scripts/install.sh}"
@@ -877,6 +877,11 @@ apt_package_available() {
   apt-cache show "$pkg" >/dev/null 2>&1
 }
 
+package_installed() {
+  local pkg="$1"
+  dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -qx 'install ok installed'
+}
+
 select_first_available_package() {
   local pkg
   for pkg in "$@"; do
@@ -893,10 +898,27 @@ add_available_package() {
   local pkg
   pkg="$(select_first_available_package "$@" || true)"
   if [[ -n "$pkg" ]]; then
-    eval "$__array_name+=(\"$pkg\")"
+    eval "$__array_name+=("$pkg")"
     return 0
   fi
   return 1
+}
+
+remove_installed_packages_if_present() {
+  local label="$1"; shift
+  local pkg remove_pkgs=()
+  for pkg in "$@"; do
+    if package_installed "$pkg"; then
+      remove_pkgs+=("$pkg")
+    fi
+  done
+
+  if [[ ${#remove_pkgs[@]} -eq 0 ]]; then
+    success "$label: no installed matching packages"
+    return 0
+  fi
+
+  run_cmd "$label" env DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq "${remove_pkgs[@]}"
 }
 
 
@@ -983,10 +1005,10 @@ step_guacamole() {
     fi
   else
     warn "RDP support disabled by default to avoid Debian 13 / FreeRDP 3 build failures; SSH/VNC/Telnet remain enabled"
-    run_cmd_allow_fail "Removing FreeRDP development packages while RDP support is disabled"       env DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq freerdp2-dev freerdp3-dev
+    remove_installed_packages_if_present "Removing installed FreeRDP development packages while RDP support is disabled"       freerdp2-dev freerdp3-dev libfreerdp-dev libfreerdp2-dev libfreerdp3-dev
   fi
 
-  run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive     apt-get install -y -qq "${deps[@]}"
+  run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${deps[@]}"
 
   # Build guacd from source
   local tar_file="/tmp/guacamole-server-${GUAC_VERSION}.tar.gz"

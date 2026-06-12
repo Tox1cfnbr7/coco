@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, field_validator
 from core.database import get_db
 from core.security import (
     hash_password, verify_password, create_access_token,
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 class RegisterRequest(BaseModel):
     username: str
-    email: EmailStr
+    email: str
     password: str
     team_type: TeamType
     invite_token: str
@@ -37,9 +37,16 @@ class RegisterRequest(BaseModel):
             raise ValueError("Password must be at least 10 characters")
         return v
 
+    @field_validator("email")
+    @classmethod
+    def email_valid(cls, v):
+        if "@" not in v or "." not in v.split("@")[-1]:
+            raise ValueError("Invalid email address")
+        return v.lower()
+
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: str
     password: str
 
 

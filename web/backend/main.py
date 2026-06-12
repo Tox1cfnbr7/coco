@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="COCO — Attack & Defense Platform",
-    version="0.4.0",
+    version="0.9.7",
     docs_url="/api/docs" if os.getenv("COCO_DEBUG") else None,
     redoc_url=None,
     lifespan=lifespan,
@@ -68,9 +68,22 @@ app.include_router(guacamole.router)
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": "0.4.0"}
+    return {"status": "ok", "version": os.getenv("COCO_APP_VERSION", "0.9.7")}
 
 
+# ── Frontend (SPA) ─────────────────────────────────────────
+# Serve static assets directly, all other routes → index.html
+# so React Router can handle /login, /dashboard, /games/*, etc.
 frontend_dist = "/opt/coco/repo/web/frontend/dist"
+
 if os.path.exists(frontend_dist):
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+    assets_dir = os.path.join(frontend_dist, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        index = os.path.join(frontend_dist, "index.html")
+        if os.path.exists(index):
+            return FileResponse(index)
+        return JSONResponse({"error": "Frontend not built"}, status_code=404)

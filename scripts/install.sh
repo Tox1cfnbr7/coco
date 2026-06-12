@@ -12,8 +12,8 @@ IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Versioning ─────────────────────────────────────────────
-COCO_INSTALLER_VERSION="0.9.3"
-COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.3}"
+COCO_INSTALLER_VERSION="0.9.4"
+COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.4}"
 COCO_REPO_URL="${COCO_REPO_URL:-https://github.com/Tox1cfnbr7/coco.git}"
 COCO_REPO_BRANCH="${COCO_REPO_BRANCH:-main}"
 COCO_INSTALLER_RAW_URL="${COCO_INSTALLER_RAW_URL:-https://raw.githubusercontent.com/Tox1cfnbr7/coco/main/scripts/install.sh}"
@@ -39,6 +39,10 @@ COCO_RESUME_SERVICE="/etc/systemd/system/coco-install-resume.service"
 PACKER_VERSION="${PACKER_VERSION:-1.11.0}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 GUAC_VERSION="${GUAC_VERSION:-1.6.0}"
+# COCO mainly needs Guacamole for browser-based SSH/terminal access.
+# RDP build on Debian 13 currently fails with FreeRDP 3.x deprecation warnings
+# treated as errors in guacamole-server 1.6.0. Keep RDP disabled by default.
+COCO_GUAC_ENABLE_RDP="${COCO_GUAC_ENABLE_RDP:-0}"
 
 # ── Flags ──────────────────────────────────────────────────
 VERBOSE=0
@@ -970,14 +974,19 @@ step_guacamole() {
   add_available_package deps libjpeg62-turbo-dev libjpeg-dev \
     || fail "No JPEG development package available (tried libjpeg62-turbo-dev, libjpeg-dev)"
 
-  if add_available_package deps freerdp3-dev freerdp2-dev; then
-    success "FreeRDP development package selected"
+  if [[ "${COCO_GUAC_ENABLE_RDP}" == "1" ]]; then
+    if add_available_package deps freerdp2-dev freerdp3-dev; then
+      success "FreeRDP development package selected; RDP support requested"
+    else
+      warn "RDP support requested but no FreeRDP development package is available; building without RDP"
+      COCO_GUAC_ENABLE_RDP="0"
+    fi
   else
-    warn "No FreeRDP development package found — guacd will build without RDP support"
+    warn "RDP support disabled by default to avoid Debian 13 / FreeRDP 3 build failures; SSH/VNC/Telnet remain enabled"
+    run_cmd_allow_fail "Removing FreeRDP development packages while RDP support is disabled"       env DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq freerdp2-dev freerdp3-dev
   fi
 
-  run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y -qq "${deps[@]}"
+  run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive     apt-get install -y -qq "${deps[@]}"
 
   # Build guacd from source
   local tar_file="/tmp/guacamole-server-${GUAC_VERSION}.tar.gz"
@@ -989,7 +998,22 @@ step_guacamole() {
   rm -rf "$src_dir"
   run_cmd "Extracting guacamole-server" tar -xzf "$tar_file" -C /tmp
   pushd "$src_dir" >/dev/null
-  run_cmd "Configuring guacd" ./configure --with-init-dir=/etc/init.d
+
+  local configure_args=(--with-init-dir=/etc/init.d)
+  if [[ "${COCO_GUAC_ENABLE_RDP}" != "1" ]]; then
+    if ./configure --help 2>/dev/null | grep -q -- '--disable-rdp'; then
+      configure_args+=(--disable-rdp)
+    else
+      warn "guacamole-server configure does not expose --disable-rdp; continuing without explicit RDP disable"
+    fi
+  else
+    # FreeRDP 3.x exposes deprecated APIs that guacamole-server 1.6.0 may treat
+    # as build errors. This macro hides those deprecated FreeRDP 3 declarations
+    # where supported. FreeRDP 2 ignores it.
+    export CPPFLAGS="${CPPFLAGS:-} -DWITHOUT_FREERDP_3x_DEPRECATED"
+  fi
+
+  run_cmd "Configuring guacd" ./configure "${configure_args[@]}"
   run_cmd "Building guacd (this takes a few minutes)" make -j"$(nproc)"
   run_cmd "Installing guacd" make install
   popd >/dev/null

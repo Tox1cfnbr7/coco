@@ -12,8 +12,8 @@ IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Versioning ─────────────────────────────────────────────
-COCO_INSTALLER_VERSION="0.9.6"
-COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.6}"
+COCO_INSTALLER_VERSION="0.9.7"
+COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.7}"
 COCO_REPO_URL="${COCO_REPO_URL:-https://github.com/Tox1cfnbr7/coco.git}"
 COCO_REPO_BRANCH="${COCO_REPO_BRANCH:-main}"
 COCO_INSTALLER_RAW_URL="${COCO_INSTALLER_RAW_URL:-https://raw.githubusercontent.com/Tox1cfnbr7/coco/main/scripts/install.sh}"
@@ -1212,6 +1212,70 @@ APIEOF
   mkdir -p "${frontend}/lib"
   cp -f "$api_file" "${frontend}/lib/api.js"
 
+  # Some snapshots import ../../store/auth from src/pages/*, which resolves to
+  # <frontend>/store/auth.js. Others import ../store/auth, which resolves to
+  # <frontend>/src/store/auth.js. Create both shims so Vite can resolve either.
+  for auth_file in "${frontend}/store/auth.js" "${src_dir}/store/auth.js"; do
+    if [[ ! -f "$auth_file" ]]; then
+      mkdir -p "$(dirname "$auth_file")"
+      cat > "$auth_file" <<'AUTHEOF'
+import { create } from 'zustand'
+import api, { authApi } from '../lib/api.js'
+
+const tokenKey = 'coco_token'
+
+export const useAuthStore = create((set, get) => ({
+  token: localStorage.getItem(tokenKey),
+  user: null,
+  isAuthenticated: !!localStorage.getItem(tokenKey),
+  loading: false,
+  error: null,
+
+  login: async (email, password) => {
+    set({ loading: true, error: null })
+    try {
+      const res = await authApi.login(email, password)
+      const data = res.data || {}
+      const token = data.access_token || data.token || data.accessToken
+      if (token) {
+        localStorage.setItem(tokenKey, token)
+        api.defaults.headers.common.Authorization = `Bearer ${token}`
+      }
+      set({ token, user: data.user || null, isAuthenticated: !!token, loading: false })
+      return data
+    } catch (err) {
+      const message = err.response?.data?.detail || err.message || 'Login failed'
+      set({ error: message, loading: false })
+      throw err
+    }
+  },
+
+  logout: () => {
+    localStorage.removeItem(tokenKey)
+    delete api.defaults.headers.common.Authorization
+    set({ token: null, user: null, isAuthenticated: false })
+  },
+
+  fetchMe: async () => {
+    try {
+      const res = await authApi.me()
+      set({ user: res.data || null, isAuthenticated: true })
+      return res.data
+    } catch (err) {
+      get().logout()
+      return null
+    }
+  },
+
+  setUser: (user) => set({ user }),
+}))
+
+export default useAuthStore
+AUTHEOF
+      success "Created missing frontend auth store shim: $auth_file"
+    fi
+  done
+
   if [[ -f "$pkg_file" ]]; then
     python3 - "$pkg_file" "$COCO_APP_VERSION" <<'PYPKG' || warn "Could not normalize frontend package.json"
 from pathlib import Path
@@ -1294,19 +1358,21 @@ step_frontend() {
   fi
 
   info "Building React/Vite frontend"
-  set +e
-  npm run build >> "$LOG_FILE" 2>&1
-  build_rc=$?
-  set -e
+  if npm run build >> "$LOG_FILE" 2>&1; then
+    build_rc=0
+  else
+    build_rc=$?
+  fi
   if [[ $build_rc -ne 0 ]]; then
     warn "React frontend build failed; applying compatibility repair and retrying once"
     popd >/dev/null
     repair_frontend_compat
     pushd "$frontend" >/dev/null
-    set +e
-    npm run build >> "$LOG_FILE" 2>&1
-    build_rc=$?
-    set -e
+    if npm run build >> "$LOG_FILE" 2>&1; then
+      build_rc=0
+    else
+      build_rc=$?
+    fi
   fi
   popd >/dev/null
 

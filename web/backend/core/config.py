@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     database_url: str
     redis_url: str = "redis://localhost:6379"
 
+    proxmox_host:     str = "localhost"
+    proxmox_user:     str = "root@pam"
+    proxmox_password: str = ""
+    proxmox_node:     str = "pve"
+
+    coco_repo_dir: str = "/opt/coco/repo"
+
     coco_ip: str = "0.0.0.0"
     coco_port: int = 443
     ssl_cert: str = "/opt/coco/ssl/coco.crt"

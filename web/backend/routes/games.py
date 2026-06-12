@@ -120,7 +120,7 @@ def get_game(
 
 
 @router.post("/{game_id}/start")
-def start_game(
+async def start_game(
     game_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
@@ -131,11 +131,16 @@ def start_game(
     if game.status != GameStatus.waiting:
         raise HTTPException(status_code=400, detail="Game already started or ended")
 
-    game.status = GameStatus.running
-    game.started_at = datetime.now(timezone.utc)
-    db.add(GameEvent(game_id=game.id, user_id=current_user.id, event_type="game_start"))
-    db.commit()
-    return {"message": "Game started"}
+    # Start provisioning in background
+    from services.game_engine import GameEngine
+    import asyncio
+
+    async def provision():
+        engine = GameEngine(db)
+        await engine.start_game(game)
+
+    asyncio.create_task(provision())
+    return {"message": "Game provisioning started", "game_id": game_id}
 
 
 @router.post("/{game_id}/flag")

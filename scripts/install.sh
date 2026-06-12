@@ -1,103 +1,335 @@
 #!/usr/bin/env bash
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.5.0
-#   Target: Debian 13 (Trixie) + Proxmox VE 9
-#   Stack: FastAPI + React + PostgreSQL + Redis (native, no Docker)
+#   Installer v0.8.0
+#   Target:  Debian 13 (Trixie) + Proxmox VE 9
+#   Stack:   FastAPI + React + PostgreSQL + Redis + Guacamole
+#   Repo:    https://github.com/Tox1cfnbr7/coco
 # ============================================================
 
-set -euo pipefail
+set -Eeuo pipefail
+IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-COCO_VERSION="0.6.0"
-COCO_DIR="/opt/coco"
-LOG_FILE="/var/log/coco-install.log"
-STATE_FILE="/var/lib/coco-install.state"
-COCO_SERVICE="/etc/systemd/system/coco-install-resume.service"
+# ── Versioning ─────────────────────────────────────────────
+COCO_INSTALLER_VERSION="0.8.0"
+COCO_APP_VERSION="${COCO_APP_VERSION:-0.8.0}"
+COCO_REPO_URL="${COCO_REPO_URL:-https://github.com/Tox1cfnbr7/coco.git}"
+COCO_REPO_BRANCH="${COCO_REPO_BRANCH:-main}"
+COCO_INSTALLER_RAW_URL="${COCO_INSTALLER_RAW_URL:-https://raw.githubusercontent.com/Tox1cfnbr7/coco/main/scripts/install.sh}"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-DIM='\033[2m'
-RESET='\033[0m'
+# ── Paths ──────────────────────────────────────────────────
+COCO_DIR="${COCO_DIR:-/opt/coco}"
+COCO_REPO_DIR="${COCO_DIR}/repo"
+COCO_VENV_DIR="${COCO_DIR}/venv"
+COCO_SSL_DIR="${COCO_DIR}/ssl"
+COCO_ENV_FILE="${COCO_DIR}/.env"
+COCO_CONFIG_FILE="${COCO_DIR}/.install-config"
+COCO_VERSION_FILE="${COCO_DIR}/VERSION"
 
-log()     { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"; }
-info()    { echo -e "${CYAN}  [*]${RESET} $*"; log "INFO: $*"; }
-success() { echo -e "${GREEN}  [+]${RESET} $*"; log "OK:   $*"; }
-warn()    { echo -e "${YELLOW}  [!]${RESET} $*"; log "WARN: $*"; }
-error()   { echo -e "${RED}  [-] $*${RESET}"; log "ERR:  $*"; exit 1; }
-step()    { echo ""; echo -e "  ${BOLD}${CYAN}>> $*${RESET}"; echo ""; }
-divider() { echo -e "  ${DIM}────────────────────────────────────────────────${RESET}"; }
+LOG_DIR="${LOG_DIR:-/var/log/coco}"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/install.log}"
+STATE_DIR="${STATE_DIR:-/var/lib/coco-install}"
+STEP_DIR="${STATE_DIR}/steps"
+CURRENT_STEP_FILE="${STATE_DIR}/current.step"
+STATE_FILE="${STATE_DIR}/state"
+COCO_RESUME_SERVICE="/etc/systemd/system/coco-install-resume.service"
 
-# ── Live spinner ───────────────────────────────────────────
-SPINNER_PID=""
+# ── Tool versions ──────────────────────────────────────────
+PACKER_VERSION="${PACKER_VERSION:-1.11.0}"
+NODE_MAJOR="${NODE_MAJOR:-22}"
+GUAC_VERSION="${GUAC_VERSION:-1.5.5}"
 
-spinner_start() {
-    local msg="$1"
-    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-    (
-        local i=0
-        while true; do
-            printf "\r  ${CYAN}${frames[$i]}${RESET}  %s..." "$msg"
-            i=$(( (i+1) % ${#frames[@]} ))
-            sleep 0.1
-        done
-    ) &
-    SPINNER_PID=$!
-    disown "$SPINNER_PID" 2>/dev/null || true
+# ── Flags ──────────────────────────────────────────────────
+VERBOSE=0
+ASSUME_YES=0
+RESUME=0
+NO_REBOOT=0
+
+# ── Install steps ──────────────────────────────────────────
+INSTALL_STEPS=(
+  bootstrap
+  proxmox
+  kernel_reboot
+  sysconfig
+  coco
+  backend
+  postgres
+  redis
+  guacamole
+  ansible
+  packer
+  node
+  ssl
+  frontend
+  dbinit
+  admin
+  service
+)
+TOTAL_STEPS="${#INSTALL_STEPS[@]}"
+
+# ── Colors ─────────────────────────────────────────────────
+if [[ -t 1 && "${NO_COLOR:-0}" != "1" ]]; then
+  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+  CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; DIM=''; RESET=''
+fi
+
+# ── Logging ────────────────────────────────────────────────
+timestamp()    { date '+%Y-%m-%d %H:%M:%S'; }
+log_line()     { local lvl="$1"; shift; printf '%s [%s] %s\n' "$(timestamp)" "$lvl" "$*" >> "$LOG_FILE"; }
+info()         { printf '%b  [*]%b %s\n' "$CYAN"   "$RESET" "$*"; log_line "INFO" "$*"; }
+success()      { printf '%b  [+]%b %s\n' "$GREEN"  "$RESET" "$*"; log_line "OK"   "$*"; }
+warn()         { printf '%b  [!]%b %s\n' "$YELLOW" "$RESET" "$*"; log_line "WARN" "$*"; }
+fail()         { printf '%b  [-] %s%b\n' "$RED"    "$*" "$RESET"; log_line "ERR"  "$*"; exit 1; }
+section()      { echo ""; printf '  %b>> %s%b\n' "${BOLD}${CYAN}" "$*" "$RESET"; echo ""; log_line "STEP" "$*"; }
+divider()      { printf '  %b────────────────────────────────────────────────%b\n' "$DIM" "$RESET"; }
+
+ensure_runtime_dirs() {
+  mkdir -p "$COCO_DIR" "$COCO_SSL_DIR" "$LOG_DIR" "$STATE_DIR" "$STEP_DIR"
+  chmod 700 "$STATE_DIR" "$STEP_DIR" 2>/dev/null || true
+  touch "$LOG_FILE"
+  chmod 600 "$LOG_FILE" 2>/dev/null || true
 }
 
-spinner_stop() {
-    if [[ -n "$SPINNER_PID" ]]; then
-        kill "$SPINNER_PID" 2>/dev/null || true
-        wait "$SPINNER_PID" 2>/dev/null || true
-        SPINNER_PID=""
-        printf "\r\033[K"
-    fi
+print_log_tail() {
+  if [[ -f "$LOG_FILE" ]]; then
+    echo ""
+    printf '  %bLast 30 log lines from %s:%b\n' "$DIM" "$LOG_FILE" "$RESET"
+    tail -n 30 "$LOG_FILE" || true
+  fi
 }
 
-# Run a command with spinner — shows live progress
-run_step() {
-    local msg="$1"; shift
-    spinner_start "$msg"
-    if "$@" >> "$LOG_FILE" 2>&1; then
-        spinner_stop
-        success "$msg"
-        return 0
-    else
-        spinner_stop
-        warn "$msg failed — check ${LOG_FILE}"
-        return 1
-    fi
+run_cmd() {
+  local msg="$1"; shift
+  info "$msg"
+  log_line "RUN" "$(printf '%q ' "$@")"
+  local rc=0
+  set +e
+  if [[ "$VERBOSE" == "1" ]]; then
+    "$@" 2>&1 | tee -a "$LOG_FILE"; rc=${PIPESTATUS[0]}
+  else
+    "$@" >> "$LOG_FILE" 2>&1; rc=$?
+  fi
+  set -e
+  if [[ $rc -eq 0 ]]; then
+    success "$msg"
+  else
+    warn "$msg failed (exit $rc)"
+    print_log_tail
+    exit "$rc"
+  fi
 }
 
-# ── Progress bar ───────────────────────────────────────────
-TOTAL_STEPS=17
-CURRENT_STEP=0
+run_cmd_allow_fail() {
+  local msg="$1"; shift
+  info "$msg"
+  set +e; "$@" >> "$LOG_FILE" 2>&1; local rc=$?; set -e
+  if [[ $rc -eq 0 ]]; then success "$msg"; else warn "$msg returned $rc; continuing"; fi
+}
 
-progress() {
-    CURRENT_STEP=$((CURRENT_STEP + 1))
-    local pct=$(( CURRENT_STEP * 100 / TOTAL_STEPS ))
-    local filled=$(( pct / 5 ))
-    local empty=$(( 20 - filled ))
-    local bar=""
-    for ((i=0; i<filled; i++)); do bar+="█"; done
-    for ((i=0; i<empty; i++)); do bar+="░"; done
-    echo -e "  ${DIM}[${bar}] ${pct}% — step ${CURRENT_STEP}/${TOTAL_STEPS}${RESET}"
+on_error() {
+  local rc=$? line="${BASH_LINENO[0]:-?}" cmd="${BASH_COMMAND:-?}"
+  local current="unknown"
+  [[ -f "$CURRENT_STEP_FILE" ]] && current="$(cat "$CURRENT_STEP_FILE" 2>/dev/null || echo unknown)"
+  log_line "FATAL" "line=$line rc=$rc step=$current cmd=$cmd"
+  printf '\n%b  [-] Installer failed at line %s, step: %s%b\n' "$RED" "$line" "$current" "$RESET"
+  print_log_tail
+  exit "$rc"
+}
+trap on_error ERR
+
+# ── Argument parsing ───────────────────────────────────────
+usage() {
+  cat <<USAGE
+COCO installer v${COCO_INSTALLER_VERSION}
+
+Usage: bash install.sh [options]
+
+Options:
+  --resume      Resume installation after reboot (used by systemd)
+  --verbose     Print all command output to console
+  -y, --yes     Skip confirmation prompt
+  --no-reboot   Do not reboot automatically (for testing)
+  --version     Print installer version
+  -h, --help    Show this help
+USAGE
+}
+
+parse_args() {
+  VERBOSE="${COCO_VERBOSE:-0}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --resume)    RESUME=1 ;;
+      --verbose)   VERBOSE=1 ;;
+      -y|--yes)    ASSUME_YES=1 ;;
+      --no-reboot) NO_REBOOT=1 ;;
+      --version)   echo "$COCO_INSTALLER_VERSION"; exit 0 ;;
+      -h|--help)   usage; exit 0 ;;
+      *) fail "Unknown argument: $1" ;;
+    esac
+    shift
+  done
+}
+
+require_root() {
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || fail "Run as root: sudo bash install.sh"
+}
+
+is_systemd_available() {
+  command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system || -d /etc/systemd/system ]]
 }
 
 # ── State management ───────────────────────────────────────
-save_state() { echo "$1" > "$STATE_FILE"; log "STATE: $1"; }
-get_state()  { [[ -f "$STATE_FILE" ]] && cat "$STATE_FILE" || echo "start"; }
-done_state() { local s; s=$(get_state); [[ "$s" == "$1" || "$s" > "$1" ]]; }
+step_number() {
+  local key="$1" i=1 s
+  for s in "${INSTALL_STEPS[@]}"; do
+    [[ "$s" == "$key" ]] && { echo "$i"; return 0; }
+    i=$((i+1))
+  done
+  echo "?"
+}
+
+is_done()   { [[ -f "${STEP_DIR}/${1}.done" ]]; }
+mark_done() {
+  mkdir -p "$STEP_DIR"
+  : > "${STEP_DIR}/${1}.done"
+  echo "$1" > "$STATE_FILE"
+  rm -f "${STEP_DIR}/${1}.failed" 2>/dev/null || true
+  log_line "STATE" "done=$1"
+}
+
+completed_steps() {
+  local count=0 s
+  for s in "${INSTALL_STEPS[@]}"; do is_done "$s" && count=$((count+1)); done
+  echo "$count"
+}
+
+progress_bar() {
+  local done_count pct filled empty bar="" i
+  done_count="$(completed_steps)"
+  pct=$(( done_count * 100 / TOTAL_STEPS ))
+  filled=$(( pct / 5 ))
+  empty=$(( 20 - filled ))
+  for ((i=0; i<filled; i++)); do bar+="█"; done
+  for ((i=0; i<empty; i++)); do bar+="░"; done
+  printf '  %b[%s] %s%% — %s/%s steps%b\n' "$DIM" "$bar" "$pct" "$done_count" "$TOTAL_STEPS" "$RESET"
+}
+
+with_step() {
+  local key="$1" title="$2" fn="$3"
+  if is_done "$key"; then
+    success "$title: already done"
+    progress_bar
+    return 0
+  fi
+  echo "$key" > "$CURRENT_STEP_FILE"
+  section "$title"
+  info "Step $(step_number "$key")/${TOTAL_STEPS}: $key"
+  "$fn"
+  mark_done "$key"
+  success "$title complete"
+  progress_bar
+}
+
+# ── Config helpers ─────────────────────────────────────────
+backup_file() {
+  local f="$1"
+  [[ -f "$f" && ! -f "${f}.coco.bak" ]] && cp -a "$f" "${f}.coco.bak" && log_line "BACKUP" "$f"
+}
+
+shell_config_write() {
+  umask 077
+  {
+    printf 'COCO_IP=%q\n'             "$COCO_IP"
+    printf 'PVE_HOSTNAME=%q\n'        "$PVE_HOSTNAME"
+    printf 'PVE_ROOT_PASSWORD=%q\n'   "$PVE_ROOT_PASSWORD"
+    printf 'COCO_ADMIN_EMAIL=%q\n'    "$COCO_ADMIN_EMAIL"
+    printf 'COCO_ADMIN_PASSWORD=%q\n' "$COCO_ADMIN_PASSWORD"
+    printf 'SECRET_KEY=%q\n'          "$SECRET_KEY"
+    printf 'COCO_APP_VERSION=%q\n'    "$COCO_APP_VERSION"
+    printf 'COCO_REPO_URL=%q\n'       "$COCO_REPO_URL"
+    printf 'COCO_REPO_BRANCH=%q\n'    "$COCO_REPO_BRANCH"
+  } > "$COCO_CONFIG_FILE"
+  chmod 600 "$COCO_CONFIG_FILE"
+}
+
+load_install_config() {
+  [[ -f "$COCO_CONFIG_FILE" ]] || fail "Config not found: $COCO_CONFIG_FILE — run the installer from scratch."
+  set -a
+  # shellcheck disable=SC1090
+  source "$COCO_CONFIG_FILE"
+  set +a
+  info "Config loaded — resuming for ${COCO_IP}"
+}
+
+dotenv_quote() {
+  local v="$1"
+  v="${v//\\/\\\\}"; v="${v//\"/\\\"}"; v="${v//$'\n'/\\n}"
+  printf '"%s"' "$v"
+}
+
+env_set() {
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp)"
+  touch "$COCO_ENV_FILE"
+  grep -v -E "^${key}=" "$COCO_ENV_FILE" > "$tmp" || true
+  printf '%s=%s\n' "$key" "$(dotenv_quote "$value")" >> "$tmp"
+  mv "$tmp" "$COCO_ENV_FILE"
+  chmod 600 "$COCO_ENV_FILE"
+}
+
+env_get() {
+  local key="$1" line
+  [[ -f "$COCO_ENV_FILE" ]] || return 1
+  line="$(grep -E "^${key}=" "$COCO_ENV_FILE" | tail -n1 || true)"
+  [[ -n "$line" ]] || return 1
+  line="${line#*=}"; line="${line%\"}"; line="${line#\"}"
+  printf '%s' "$line"
+}
+
+load_env_file() {
+  [[ -f "$COCO_ENV_FILE" ]] || fail "Missing env file: $COCO_ENV_FILE"
+  set -a
+  # shellcheck disable=SC1090
+  source "$COCO_ENV_FILE"
+  set +a
+}
+
+# Detect backend/frontend dirs (supports both web/backend and backend layouts)
+backend_dir() {
+  if   [[ -d "$COCO_REPO_DIR/web/backend" ]]; then printf '%s' "$COCO_REPO_DIR/web/backend"
+  elif [[ -d "$COCO_REPO_DIR/backend"     ]]; then printf '%s' "$COCO_REPO_DIR/backend"
+  else printf '%s' "$COCO_REPO_DIR/web/backend"; fi
+}
+
+frontend_dir() {
+  if   [[ -d "$COCO_REPO_DIR/web/frontend" ]]; then printf '%s' "$COCO_REPO_DIR/web/frontend"
+  elif [[ -d "$COCO_REPO_DIR/frontend"     ]]; then printf '%s' "$COCO_REPO_DIR/frontend"
+  else printf '%s' "$COCO_REPO_DIR/web/frontend"; fi
+}
+
+write_version_file() {
+  local commit="unknown"
+  [[ -d "$COCO_REPO_DIR/.git" ]] && commit="$(git -C "$COCO_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  umask 077
+  cat > "$COCO_VERSION_FILE" <<EOF
+COCO_INSTALLER_VERSION=${COCO_INSTALLER_VERSION}
+COCO_APP_VERSION=${COCO_APP_VERSION}
+COCO_REPO_URL=${COCO_REPO_URL}
+COCO_REPO_BRANCH=${COCO_REPO_BRANCH}
+COCO_REPO_COMMIT=${commit}
+INSTALLED_AT=$(date -Is)
+EOF
+  chmod 600 "$COCO_VERSION_FILE"
+}
 
 # ── Logo ───────────────────────────────────────────────────
 print_logo() {
-    clear
-    echo -e "${CYAN}"
-    cat << 'LOGO'
+  clear 2>/dev/null || true
+  printf '%b' "$CYAN"
+  cat << 'LOGO'
   ██████╗  ██████╗  ██████╗  ██████╗
  ██╔════╝ ██╔═══██╗██╔════╝ ██╔═══██╗
  ██║      ██║   ██║██║      ██║   ██║
@@ -106,780 +338,717 @@ print_logo() {
   ╚═════╝  ╚═════╝  ╚═════╝  ╚═════╝
          Attack & Defense Platform
 LOGO
-    echo -e "${RESET}"
-    echo -e "  ${BOLD}Version${RESET}  ${COCO_VERSION}  |  ${BOLD}Target${RESET}  Debian 13 + Proxmox VE 9"
-    echo -e "  ${BOLD}Log${RESET}      ${LOG_FILE}"
-    divider
-    echo ""
+  printf '%b' "$RESET"
+  printf '  Version : %s | App : %s\n' "$COCO_INSTALLER_VERSION" "$COCO_APP_VERSION"
+  printf '  Target  : Debian 13 (Trixie) + Proxmox VE 9\n'
+  printf '  Log     : %s\n' "$LOG_FILE"
+  divider
+  echo ""
 }
 
-# ── Checks ─────────────────────────────────────────────────
-check_root() {
-    [[ $EUID -eq 0 ]] || error "Run as root: sudo bash install.sh"
-}
-
+# ── Preflight ──────────────────────────────────────────────
 check_os() {
-    step "System check"
-    progress
-    [[ -f /etc/debian_version ]] || error "Requires Debian 13."
-    success "OS: Debian $(cat /etc/debian_version)"
+  section "System check"
+  [[ -f /etc/os-release ]] || fail "Missing /etc/os-release — Debian 13 required."
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  [[ "${ID:-}" == "debian" ]] || fail "Unsupported OS: ${PRETTY_NAME:-unknown}. Debian 13 required."
+  [[ "${VERSION_ID:-}" == "13" || "${VERSION_CODENAME:-}" == "trixie" ]] \
+    || fail "Unsupported Debian version: ${PRETTY_NAME:-unknown}. Debian 13 (Trixie) required."
+  success "OS: ${PRETTY_NAME:-Debian 13}"
 
-    local ram_gb
-    ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
-    [[ $ram_gb -lt 8 ]] && warn "RAM: ${ram_gb} GB — recommended 16+ GB" \
-        || success "RAM: ${ram_gb} GB"
+  local ram_gb disk_gb
+  ram_gb="$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)"
+  [[ "$ram_gb" -lt 8  ]] && fail "RAM: ${ram_gb} GB — minimum 8 GB required."
+  [[ "$ram_gb" -lt 16 ]] && warn "RAM: ${ram_gb} GB — 16+ GB recommended." || success "RAM: ${ram_gb} GB"
 
-    local disk_gb
-    disk_gb=$(df / --output=avail -BG | tail -1 | tr -d 'G ')
-    [[ $disk_gb -lt 50 ]] && error "Disk: only ${disk_gb} GB free — need 50+ GB" \
-        || success "Disk: ${disk_gb} GB free"
+  disk_gb="$(df / --output=avail -BG | tail -1 | tr -d 'G ')"
+  [[ "$disk_gb" -lt 50  ]] && fail "Disk: ${disk_gb} GB free — minimum 50 GB required."
+  [[ "$disk_gb" -lt 300 ]] && warn "Disk: ${disk_gb} GB free — 300+ GB recommended." || success "Disk: ${disk_gb} GB free"
 
-    if grep -qE 'vmx|svm' /proc/cpuinfo; then
-        success "CPU: Nested virtualization flags present (vmx/svm)"
-    else
-        warn "CPU: No vmx/svm flags — set Proxmox CPU type to 'host'"
-    fi
+  grep -qE 'vmx|svm' /proc/cpuinfo \
+    && success "CPU: nested virtualization flags present (vmx/svm)" \
+    || warn "CPU: no vmx/svm flags — set Proxmox CPU type to 'host'"
 }
 
-# ── Config ─────────────────────────────────────────────────
+detected_primary_ip() {
+  local ip=""
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1 || true)"
+  [[ -z "$ip" ]] && ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  printf '%s' "$ip"
+}
+
 collect_config() {
-    step "Configuration"
-    progress
-    echo -e "  ${DIM}Press Enter to accept defaults.${RESET}"
-    echo ""
+  section "Configuration"
+  echo "  Press Enter to accept defaults."
+  echo ""
 
-    local detected_ip
-    detected_ip=$(hostname -I | awk '{print $1}')
-    local detected_hostname
-    detected_hostname=$(hostname)
+  local detected_ip detected_hostname
+  detected_ip="$(detected_primary_ip)"
+  detected_hostname="$(hostname 2>/dev/null || echo coco)"
 
-    read -rp "  $(echo -e "${BOLD}COCO VM IP${RESET}") [${detected_ip}]: " COCO_IP
-    COCO_IP=${COCO_IP:-$detected_ip}
+  read -rp "  COCO VM IP [${detected_ip}]: " COCO_IP
+  COCO_IP="${COCO_IP:-$detected_ip}"
+  [[ -n "$COCO_IP" ]] || fail "Could not detect IP — enter it manually."
 
-    read -rp "  $(echo -e "${BOLD}Proxmox hostname${RESET}") [${detected_hostname}]: " PVE_HOSTNAME
-    PVE_HOSTNAME=${PVE_HOSTNAME:-$detected_hostname}
+  read -rp "  Proxmox hostname [${detected_hostname}]: " PVE_HOSTNAME
+  PVE_HOSTNAME="${PVE_HOSTNAME:-$detected_hostname}"
 
-    read -rsp "  $(echo -e "${BOLD}Root password (for Proxmox GUI login)${RESET}"): " PVE_ROOT_PASSWORD
-    echo ""
-    read -rsp "  $(echo -e "${BOLD}Confirm password${RESET}"): " PVE_ROOT_PASSWORD_CONFIRM
-    echo ""
+  read -rsp "  Root password (Proxmox GUI login): " PVE_ROOT_PASSWORD; echo ""
+  read -rsp "  Confirm root password: " PVE_ROOT_PASSWORD_CONFIRM; echo ""
+  [[ "$PVE_ROOT_PASSWORD" == "$PVE_ROOT_PASSWORD_CONFIRM" ]] || fail "Passwords do not match."
+  [[ ${#PVE_ROOT_PASSWORD} -ge 8 ]] || fail "Root password must be at least 8 characters."
 
-    [[ "$PVE_ROOT_PASSWORD" == "$PVE_ROOT_PASSWORD_CONFIRM" ]] \
-        || error "Passwords do not match."
-    [[ ${#PVE_ROOT_PASSWORD} -ge 8 ]] \
-        || error "Password must be at least 8 characters."
+  echo ""
+  read -rp "  COCO admin email [admin@coco.local]: " COCO_ADMIN_EMAIL
+  COCO_ADMIN_EMAIL="${COCO_ADMIN_EMAIL:-admin@coco.local}"
+  [[ "$COCO_ADMIN_EMAIL" == *@* ]] || fail "Invalid email: $COCO_ADMIN_EMAIL"
 
-    echo ""
-    read -rp "  $(echo -e "${BOLD}COCO admin email${RESET}") [admin@coco.local]: " COCO_ADMIN_EMAIL
-    COCO_ADMIN_EMAIL=${COCO_ADMIN_EMAIL:-admin@coco.local}
+  read -rsp "  COCO admin password (min 10 chars): " COCO_ADMIN_PASSWORD; echo ""
+  [[ ${#COCO_ADMIN_PASSWORD} -ge 10 ]] || fail "Admin password must be at least 10 characters."
 
-    read -rsp "  $(echo -e "${BOLD}COCO admin password${RESET}") (min 10 chars): " COCO_ADMIN_PASSWORD
-    echo ""
-    [[ ${#COCO_ADMIN_PASSWORD} -ge 10 ]] || error "Admin password must be at least 10 characters."
+  SECRET_KEY="$(openssl rand -hex 32)"
 
-    SECRET_KEY=$(openssl rand -hex 32)
+  echo ""
+  section "Summary"
+  divider
+  printf '  Proxmox GUI  :  https://%s:8006\n' "$COCO_IP"
+  printf '  COCO Web-GUI :  https://%s\n'      "$COCO_IP"
+  printf '  Hostname     :  %s\n'              "$PVE_HOSTNAME"
+  printf '  Admin email  :  %s\n'              "$COCO_ADMIN_EMAIL"
+  printf '  Install dir  :  %s\n'              "$COCO_DIR"
+  printf '  Repo         :  %s (%s)\n'         "$COCO_REPO_URL" "$COCO_REPO_BRANCH"
+  divider
+  echo ""
 
-    echo ""
-    step "Summary"
-    progress
-    divider
-    echo -e "  Proxmox GUI  :  ${CYAN}https://${COCO_IP}:8006${RESET}"
-    echo -e "  COCO Web-GUI :  ${CYAN}https://${COCO_IP}:443${RESET}"
-    echo -e "  Hostname     :  ${PVE_HOSTNAME}"
-    echo -e "  Install dir  :  ${COCO_DIR}"
-    divider
-    echo ""
+  if [[ "$ASSUME_YES" != "1" ]]; then
+    local confirm
     read -rp "  Proceed with installation? [y/N]: " confirm
-    [[ "${confirm,,}" == "y" ]] || error "Installation cancelled."
+    [[ "${confirm,,}" == "y" || "${confirm,,}" == "yes" ]] || fail "Installation cancelled."
+  fi
 
-    # Save config for post-reboot resume
-    mkdir -p "${COCO_DIR}"
-    cat > "${COCO_DIR}/.install-config" << CFGEOF
-COCO_IP="${COCO_IP}"
-PVE_HOSTNAME="${PVE_HOSTNAME}"
-PVE_ROOT_PASSWORD="${PVE_ROOT_PASSWORD}"
-COCO_ADMIN_EMAIL="${COCO_ADMIN_EMAIL}"
-COCO_ADMIN_PASSWORD="${COCO_ADMIN_PASSWORD}"
-SECRET_KEY="${SECRET_KEY}"
-CFGEOF
-    chmod 600 "${COCO_DIR}/.install-config"
+  shell_config_write
+  success "Configuration saved to $COCO_CONFIG_FILE"
 }
 
-load_config() {
-    [[ -f "${COCO_DIR}/.install-config" ]] \
-        || error "Config not found at ${COCO_DIR}/.install-config — run install.sh from scratch."
-    # Export every variable so subshells and here-docs can see them
-    set -a
-    source "${COCO_DIR}/.install-config"
-    set +a
-    info "Config loaded — resuming as ${COCO_IP}"
+# ── Step implementations ───────────────────────────────────
+
+step_bootstrap() {
+  run_cmd "Updating package index" apt-get update -qq
+  run_cmd "Installing bootstrap tools" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    curl wget git vim unzip jq openssl ca-certificates gnupg lsb-release \
+    procps iproute2 net-tools util-linux debconf-utils \
+    python3 python3-pip python3-venv python3-dev build-essential
 }
 
-# ── Bootstrap ──────────────────────────────────────────────
-install_bootstrap() {
-    done_state "bootstrap" && { success "Bootstrap: already done"; progress; return; }
-    step "Installing bootstrap dependencies"
-    progress
-
-    run_step "Updating package index" apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive run_step "Installing base tools" \
-        apt-get install -y -qq \
-            curl wget git vim unzip jq openssl \
-            ca-certificates gnupg lsb-release \
-            procps iproute2 net-tools \
-            python3 python3-pip python3-venv
-    success "Bootstrap dependencies installed"
-    save_state "bootstrap"
-}
-
-# ── Proxmox VE ─────────────────────────────────────────────
-install_proxmox() {
-    done_state "proxmox" && { success "Proxmox VE: already installed"; progress; return; }
-    step "Installing Proxmox VE 9"
-    progress
-
-    info "Setting hostname to ${PVE_HOSTNAME}..."
-    hostnamectl set-hostname "${PVE_HOSTNAME}"
-    cat > /etc/hosts << HOSTSEOF
+step_proxmox() {
+  info "Setting hostname to ${PVE_HOSTNAME}"
+  hostnamectl set-hostname "$PVE_HOSTNAME"
+  backup_file /etc/hosts
+  cat > /etc/hosts <<EOF
 127.0.0.1       localhost
 ${COCO_IP}      ${PVE_HOSTNAME}.local ${PVE_HOSTNAME}
 ::1             localhost ip6-localhost ip6-loopback
 ff02::1         ip6-allnodes
 ff02::2         ip6-allrouters
-HOSTSEOF
-    success "Hostname set"
+EOF
+  success "Hostname configured"
 
-    info "Cleaning existing apt sources..."
-    rm -f /etc/apt/sources.list.d/pve-install-repo.list
-    rm -f /etc/apt/sources.list.d/pve-install-repo.sources
-    rm -f /etc/apt/sources.list.d/pve-enterprise.list
-    rm -f /etc/apt/sources.list.d/ceph.list
-    rm -f /etc/apt/trusted.gpg.d/proxmox-*.gpg
-    rm -f /usr/share/keyrings/proxmox-*.gpg
-    success "Old sources cleaned"
+  info "Cleaning old Proxmox apt sources"
+  rm -f /etc/apt/sources.list.d/pve-install-repo.{list,sources} \
+        /etc/apt/sources.list.d/pve-enterprise.{list,sources} \
+        /etc/apt/sources.list.d/proxmox.sources \
+        /etc/apt/sources.list.d/ceph.{list,sources} \
+        /etc/apt/trusted.gpg.d/proxmox-*.gpg \
+        /usr/share/keyrings/proxmox-*.gpg \
+        /usr/share/keyrings/proxmox-archive-keyring.gpg
+  success "Old sources cleaned"
 
-    info "Downloading Proxmox GPG key..."
-    wget --no-check-certificate -q \
-        https://download.proxmox.com/debian/proxmox-release-trixie.gpg \
-        -O /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg \
-        >> "$LOG_FILE" 2>&1
-    success "GPG key installed"
+  mkdir -p /usr/share/keyrings
+  # Trixie keyring — try enterprise URL first, fall back to download mirror
+  local key_url_primary="https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg"
+  local key_url_fallback="https://download.proxmox.com/debian/proxmox-release-trixie.gpg"
+  local key_dest="/usr/share/keyrings/proxmox-archive-keyring.gpg"
 
-    info "Adding Proxmox VE repository..."
-    cat > /etc/apt/sources.list.d/pve-install-repo.sources << REPOEOF
+  set +e
+  wget --no-check-certificate -q "$key_url_primary" -O "$key_dest" >> "$LOG_FILE" 2>&1
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 || ! -s "$key_dest" ]]; then
+    warn "Primary keyring download failed — trying fallback"
+    run_cmd "Downloading Proxmox keyring (fallback)" wget --no-check-certificate -q \
+      "$key_url_fallback" -O "$key_dest"
+  else
+    success "Proxmox GPG keyring downloaded"
+  fi
+
+  cat > /etc/apt/sources.list.d/proxmox.sources <<'EOF'
 Types: deb
 URIs: http://download.proxmox.com/debian/pve
 Suites: trixie
 Components: pve-no-subscription
-Signed-By: /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
-REPOEOF
-    success "Repository configured"
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+  success "Proxmox no-subscription repository configured"
 
-    info "Updating system..."
-    apt-get update -qq >> "$LOG_FILE" 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y -qq >> "$LOG_FILE" 2>&1
-    success "System up to date"
+  echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selections
+  echo "postfix postfix/mailname string ${PVE_HOSTNAME}" | debconf-set-selections
 
-    info "Installing Proxmox VE kernel..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-default-kernel \
-        >> "$LOG_FILE" 2>&1
-    success "Proxmox kernel installed"
+  run_cmd "Updating package index" apt-get update -qq
+  run_cmd "Upgrading base system" env DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y -qq
+  run_cmd "Installing Proxmox VE kernel" env DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-default-kernel
+  run_cmd "Installing Proxmox VE" env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    proxmox-ve postfix open-iscsi chrony
 
-    info "Installing Proxmox VE packages..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        proxmox-ve postfix open-iscsi chrony \
-        >> "$LOG_FILE" 2>&1
-    success "Proxmox VE installed"
+  info "Setting root password"
+  printf 'root:%s\n' "$PVE_ROOT_PASSWORD" | chpasswd >> "$LOG_FILE" 2>&1
+  success "Root password set"
 
-    info "Setting root password..."
-    echo -e "${PVE_ROOT_PASSWORD}\n${PVE_ROOT_PASSWORD}" | passwd root \
-        >> "$LOG_FILE" 2>&1
-    success "Root password set"
+  run_cmd_allow_fail "Removing Debian default kernel" env DEBIAN_FRONTEND=noninteractive \
+    apt-get remove -y linux-image-amd64 'linux-image-6.12*'
+  run_cmd_allow_fail "Removing os-prober" apt-get remove -y os-prober
 
-    info "Removing Debian default kernel..."
-    DEBIAN_FRONTEND=noninteractive apt-get remove -y \
-        linux-image-amd64 'linux-image-6.12*' >> "$LOG_FILE" 2>&1 || true
-    success "Debian kernel removed"
-
-    info "Updating GRUB..."
-    if command -v grub-mkconfig &>/dev/null; then
-        grub-mkconfig -o /boot/grub/grub.cfg >> "$LOG_FILE" 2>&1 || true
-    fi
-    success "GRUB updated — Proxmox kernel active after reboot"
-
-    info "Removing os-prober..."
-    apt-get remove -y os-prober >> "$LOG_FILE" 2>&1 || true
-    success "os-prober removed"
-
-    save_state "proxmox"
+  if command -v update-grub >/dev/null 2>&1; then
+    run_cmd_allow_fail "Updating GRUB" update-grub
+  elif command -v grub-mkconfig >/dev/null 2>&1; then
+    run_cmd_allow_fail "Updating GRUB" grub-mkconfig -o /boot/grub/grub.cfg
+  fi
 }
 
-# ── Setup resume service ────────────────────────────────────
+save_installer_for_resume() {
+  mkdir -p "$COCO_DIR"
+  local src="${BASH_SOURCE[0]:-}"
+  if [[ -f "$src" && "$(basename "$src")" != "bash" ]]; then
+    install -m 0700 "$src" "${COCO_DIR}/install.sh"
+    success "Installer saved to ${COCO_DIR}/install.sh"
+    return 0
+  fi
+  warn "Installer source not available — downloading for resume"
+  run_cmd "Downloading installer for resume" \
+    curl -fsSL "$COCO_INSTALLER_RAW_URL" -o "${COCO_DIR}/install.sh"
+  chmod 0700 "${COCO_DIR}/install.sh"
+}
+
 setup_resume_service() {
-    info "Setting up post-reboot resume service..."
+  is_systemd_available || fail "systemd required for post-reboot resume."
+  save_installer_for_resume
 
-    # Script an fixen Ort kopieren damit es nach Reboot gefunden wird
-    cp "$(realpath "$0")" "${COCO_DIR}/install.sh" 2>/dev/null || \
-        cp "$0" "${COCO_DIR}/install.sh" 2>/dev/null || true
-    chmod +x "${COCO_DIR}/install.sh"
-    info "Installer copied to ${COCO_DIR}/install.sh"
+  local flags="--resume"
+  [[ "$VERBOSE" == "1" ]] && flags="$flags --verbose"
 
-    cat > "$COCO_SERVICE" << SVCEOF
+  cat > "$COCO_RESUME_SERVICE" <<EOF
 [Unit]
 Description=COCO Installer Resume
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=${STATE_FILE}
+ConditionPathExists=${COCO_CONFIG_FILE}
 
 [Service]
 Type=oneshot
 ExecStartPre=/bin/sleep 10
-ExecStart=/usr/bin/bash ${COCO_DIR}/install.sh --resume
+ExecStart=/usr/bin/bash ${COCO_DIR}/install.sh ${flags}
 RemainAfterExit=yes
 StandardOutput=journal+console
 StandardError=journal+console
-TimeoutStartSec=1800
+TimeoutStartSec=7200
 
 [Install]
 WantedBy=multi-user.target
-SVCEOF
-
-    systemctl daemon-reload >> "$LOG_FILE" 2>&1
-    systemctl enable coco-install-resume.service >> "$LOG_FILE" 2>&1
-    success "Resume service registered — will continue after reboot"
+EOF
+  run_cmd "Reloading systemd" systemctl daemon-reload
+  run_cmd "Enabling resume service" systemctl enable coco-install-resume.service
+  success "Resume service registered"
 }
 
-remove_resume_service() {
-    if [[ -f "$COCO_SERVICE" ]]; then
-        systemctl disable coco-install-resume.service >> "$LOG_FILE" 2>&1 || true
-        rm -f "$COCO_SERVICE"
-        systemctl daemon-reload >> "$LOG_FILE" 2>&1 || true
-    fi
+step_kernel_reboot() {
+  local kernel
+  kernel="$(uname -r)"
+  if [[ "$kernel" == *pve* ]]; then
+    success "Proxmox kernel already active: $kernel"
+    return 0
+  fi
+
+  setup_resume_service
+
+  echo ""
+  printf '%b  [!] Reboot required to activate Proxmox VE kernel.%b\n' "$YELLOW" "$RESET"
+  echo "      Installation resumes AUTOMATICALLY after reboot."
+  echo "      Watch live progress:  journalctl -fu coco-install-resume"
+  echo "      Full log:             $LOG_FILE"
+  echo ""
+
+  if [[ "$NO_REBOOT" == "1" ]]; then
+    warn "--no-reboot set. Reboot manually then run: bash ${COCO_DIR}/install.sh --resume"
+    return 0
+  fi
+
+  mark_done "kernel_reboot"
+  sync
+  info "Rebooting in 5 seconds..."
+  sleep 5
+  systemctl reboot
+  exit 0
 }
 
-# ── Reboot checkpoint ──────────────────────────────────────
-reboot_for_kernel() {
-    done_state "rebooted" && { success "Kernel reboot: already done"; progress; return; }
+step_sysconfig() {
+  local kernel
+  kernel="$(uname -r)"
+  if [[ "$kernel" == *pve* ]]; then
+    success "Proxmox kernel active: $kernel"
+  else
+    warn "Proxmox kernel not yet active (current: $kernel) — continuing anyway"
+  fi
 
-    info "Copying installer to permanent location..."
-    cp "$(realpath "$0")" "${COCO_DIR}/install.sh" 2>/dev/null || \
-        cp "$0" "${COCO_DIR}/install.sh" 2>/dev/null || true
-    chmod +x "${COCO_DIR}/install.sh"
-
-    setup_resume_service
-    progress
-
-    echo ""
-    echo -e "${YELLOW}"
-    cat << 'RBT'
-  ────────────────────────────────────────────────
-   Reboot required to activate Proxmox VE kernel.
-
-   Installation resumes AUTOMATICALLY after reboot.
-   Watch live progress after reboot:
-
-   journalctl -fu coco-install-resume
-  ────────────────────────────────────────────────
-RBT
-    echo -e "${RESET}"
-    save_state "rebooted"
-    info "Rebooting in 5 seconds..."
-    sleep 5
-    reboot
-    exit 0
+  cat > /etc/sysctl.d/99-coco.conf <<'EOF'
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+EOF
+  run_cmd "Applying sysctl" sysctl -p /etc/sysctl.d/99-coco.conf
 }
 
-# ── Post-reboot: system config ─────────────────────────────
-configure_system() {
-    done_state "sysconfig" && { success "System config: already done"; progress; return; }
-    step "Configuring system"
-    progress
+step_coco() {
+  mkdir -p "$COCO_DIR" "$COCO_SSL_DIR" "${COCO_DIR}/logs"
 
-    local kernel
-    kernel=$(uname -r)
-    info "Running kernel: ${kernel}"
+  # Initialise .env
+  cat > "$COCO_ENV_FILE" <<EOF
+# COCO Environment — generated $(date -Is)
+EOF
+  chmod 600 "$COCO_ENV_FILE"
 
-    if [[ "$kernel" != *"pve"* ]]; then
-        warn "Not running Proxmox kernel yet (${kernel}) — may need another reboot"
-    else
-        success "Proxmox kernel active: ${kernel}"
-    fi
+  env_set SECRET_KEY          "$SECRET_KEY"
+  env_set COCO_IP             "$COCO_IP"
+  env_set COCO_PORT           "443"
+  env_set COCO_APP_VERSION    "$COCO_APP_VERSION"
+  env_set PVE_HOSTNAME        "$PVE_HOSTNAME"
+  env_set PVE_NODE            "$PVE_HOSTNAME"
+  env_set PROXMOX_HOST        "$COCO_IP"
+  env_set PROXMOX_USER        "root@pam"
+  env_set PROXMOX_PASSWORD    "$PVE_ROOT_PASSWORD"
+  env_set PROXMOX_NODE        "$PVE_HOSTNAME"
+  env_set COCO_REPO_DIR       "$COCO_REPO_DIR"
+  env_set SSL_CERT            "${COCO_SSL_DIR}/coco.crt"
+  env_set SSL_KEY             "${COCO_SSL_DIR}/coco.key"
 
-    info "Enabling IP forwarding..."
-    echo "net.ipv4.ip_forward=1"   > /etc/sysctl.d/99-coco.conf
-    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-coco.conf
-    sysctl -p /etc/sysctl.d/99-coco.conf >> "$LOG_FILE" 2>&1
-    success "IP forwarding enabled"
+  if [[ ! -d "$COCO_REPO_DIR/.git" ]]; then
+    run_cmd "Cloning COCO repository" \
+      git clone --branch "$COCO_REPO_BRANCH" "$COCO_REPO_URL" "$COCO_REPO_DIR"
+  else
+    run_cmd "Updating COCO repository" git -C "$COCO_REPO_DIR" pull --ff-only origin "$COCO_REPO_BRANCH"
+  fi
 
-    save_state "sysconfig"
+  local backend frontend
+  backend="$(backend_dir)"
+  frontend="$(frontend_dir)"
+  [[ -d "$backend" ]] || fail "Backend directory not found: $backend"
+  [[ -d "$frontend" ]] || warn "Frontend directory not found: $frontend"
+
+  env_set COCO_BACKEND_DIR  "$backend"
+  env_set COCO_FRONTEND_DIR "$frontend"
+  write_version_file
+  success "COCO repository ready at $COCO_REPO_DIR"
 }
 
-# ── Python / FastAPI backend ───────────────────────────────
-install_backend() {
-    done_state "backend" && { success "Backend: already installed"; progress; return; }
-    step "Installing Python + FastAPI backend"
-    progress
+step_backend() {
+  local backend req
+  backend="$(backend_dir)"
+  [[ -d "$backend" ]] || fail "Backend dir missing: $backend"
 
-    info "Installing Python packages..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        python3 python3-pip python3-venv python3-dev \
-        build-essential libssl-dev libffi-dev \
-        >> "$LOG_FILE" 2>&1
-    success "Python installed: $(python3 --version)"
+  run_cmd "Installing Python build dependencies" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    python3 python3-pip python3-venv python3-dev build-essential libssl-dev libffi-dev libpq-dev
 
-    info "Creating COCO Python venv..."
-    python3 -m venv "${COCO_DIR}/venv" >> "$LOG_FILE" 2>&1
-    "${COCO_DIR}/venv/bin/pip" install --quiet --upgrade pip >> "$LOG_FILE" 2>&1
+  run_cmd "Creating Python venv" python3 -m venv "$COCO_VENV_DIR"
+  run_cmd "Upgrading pip" "${COCO_VENV_DIR}/bin/pip" install --quiet --upgrade pip setuptools wheel
 
-    info "Installing Python dependencies from requirements.txt..."
-    if [[ -f "${COCO_DIR}/repo/web/backend/requirements.txt" ]]; then
-        "${COCO_DIR}/venv/bin/pip" install --quiet \
-            -r "${COCO_DIR}/repo/web/backend/requirements.txt" \
-            >> "$LOG_FILE" 2>&1
-    else
-        "${COCO_DIR}/venv/bin/pip" install --quiet \
-            fastapi "uvicorn[standard]" \
-            sqlalchemy alembic psycopg2-binary \
-            "python-jose[cryptography]" "passlib[bcrypt]" \
-            python-multipart httpx pydantic-settings \
-            redis slowapi python-dotenv \
-            >> "$LOG_FILE" 2>&1
-    fi
-    success "FastAPI + dependencies installed"
-
-    save_state "backend"
+  req="${backend}/requirements.txt"
+  if [[ -f "$req" ]]; then
+    run_cmd "Installing Python requirements" "${COCO_VENV_DIR}/bin/pip" install --quiet -r "$req"
+  else
+    warn "requirements.txt not found — installing fallback packages"
+    run_cmd "Installing fallback Python packages" "${COCO_VENV_DIR}/bin/pip" install --quiet \
+      fastapi 'uvicorn[standard]' sqlalchemy alembic psycopg2-binary \
+      'python-jose[cryptography]' 'passlib[bcrypt]' python-multipart \
+      httpx pydantic-settings redis slowapi python-dotenv
+  fi
 }
 
-# ── PostgreSQL ─────────────────────────────────────────────
-install_postgres() {
-    done_state "postgres" && { success "PostgreSQL: already installed"; progress; return; }
-    step "Installing PostgreSQL"
-    progress
+step_postgres() {
+  run_cmd "Installing PostgreSQL" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql postgresql-client
+  run_cmd "Enabling PostgreSQL" systemctl enable --now postgresql
 
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        postgresql postgresql-client \
-        >> "$LOG_FILE" 2>&1
-    systemctl enable --now postgresql >> "$LOG_FILE" 2>&1
+  local db_pass
+  db_pass="$(env_get COCO_DB_PASSWORD || true)"
+  [[ -z "$db_pass" ]] && db_pass="$(openssl rand -hex 24)"
 
-    info "Creating COCO database and user..."
-    local db_pass
-    db_pass=$(openssl rand -hex 16)
-    sudo -u postgres psql -c "CREATE USER coco WITH PASSWORD '${db_pass}';" \
-        >> "$LOG_FILE" 2>&1 || true
-    sudo -u postgres psql -c "CREATE DATABASE coco OWNER coco;" \
-        >> "$LOG_FILE" 2>&1 || true
+  local sql
+  sql="$(mktemp)"
+  cat > "$sql" <<EOF
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'coco') THEN
+    CREATE ROLE coco LOGIN PASSWORD '${db_pass}';
+  ELSE
+    ALTER ROLE coco WITH LOGIN PASSWORD '${db_pass}';
+  END IF;
+END
+\$\$;
+SELECT 'CREATE DATABASE coco OWNER coco'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'coco')\gexec
+ALTER DATABASE coco OWNER TO coco;
+EOF
+  run_cmd "Configuring COCO database" runuser -u postgres -- psql -v ON_ERROR_STOP=1 -f "$sql"
+  rm -f "$sql"
 
-    echo "DB_URL=postgresql://coco:${db_pass}@localhost/coco" \
-        >> "${COCO_DIR}/.env"
-    echo "DATABASE_URL=postgresql://coco:${db_pass}@localhost/coco" \
-        >> "${COCO_DIR}/.env"
-    echo "REDIS_URL=redis://localhost:6379" \
-        >> "${COCO_DIR}/.env"
-    success "PostgreSQL ready — database: coco"
-
-    save_state "postgres"
+  env_set COCO_DB_PASSWORD "$db_pass"
+  env_set DB_URL            "postgresql://coco:${db_pass}@localhost/coco"
+  env_set DATABASE_URL      "postgresql://coco:${db_pass}@localhost/coco"
+  env_set REDIS_URL         "redis://localhost:6379"
 }
 
-# ── Redis ──────────────────────────────────────────────────
-install_redis() {
-    done_state "redis" && { success "Redis: already installed"; progress; return; }
-    step "Installing Redis"
-    progress
-
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server \
-        >> "$LOG_FILE" 2>&1
-    systemctl enable --now redis-server >> "$LOG_FILE" 2>&1
-    success "Redis running"
-
-    save_state "redis"
+step_redis() {
+  run_cmd "Installing Redis" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server
+  run_cmd "Enabling Redis" systemctl enable --now redis-server
 }
 
-# ── Guacamole ──────────────────────────────────────────────
-install_guacamole() {
-    done_state "guacamole" && { success "Guacamole: already installed"; progress; return; }
-    step "Installing Apache Guacamole (browser-based terminal)"
-    progress
+download_with_fallback() {
+  local dest="$1" primary="$2" fallback="$3"
+  set +e
+  curl -fsSL "$primary" -o "$dest" >> "$LOG_FILE" 2>&1
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    warn "Primary download failed — trying fallback"
+    run_cmd "Downloading fallback" curl -fsSL "$fallback" -o "$dest"
+  fi
+}
 
-    local GUAC_VER="1.5.5"
-    local GUAC_URL="https://downloads.apache.org/guacamole/${GUAC_VER}/source/guacamole-server-${GUAC_VER}.tar.gz"
+step_guacamole() {
+  # Build dependencies
+  local common_deps=(
+    build-essential libcairo2-dev libpng-dev libtool-bin libossp-uuid-dev
+    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+    libpango1.0-dev libssh2-1-dev libtelnet-dev libvncserver-dev
+    libwebsockets-dev libpulse-dev libssl-dev libvorbis-dev libwebp-dev
+    tomcat10 tomcat10-admin wget curl
+  )
+  set +e
+  env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    "${common_deps[@]}" libjpeg62-turbo-dev freerdp2-dev >> "$LOG_FILE" 2>&1
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    warn "freerdp2 not available — trying freerdp3"
+    run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive \
+      apt-get install -y -qq "${common_deps[@]}" libjpeg-dev freerdp3-dev
+  else
+    success "Guacamole build dependencies installed"
+  fi
 
-    info "Installing build dependencies..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        build-essential libcairo2-dev libjpeg62-turbo-dev libpng-dev \
-        libtool-bin libossp-uuid-dev libavcodec-dev libavformat-dev \
-        libavutil-dev libswscale-dev freerdp2-dev libpango1.0-dev \
-        libssh2-1-dev libtelnet-dev libvncserver-dev libwebsockets-dev \
-        libpulse-dev libssl-dev libvorbis-dev libwebp-dev \
-        tomcat10 tomcat10-admin \
-        >> "$LOG_FILE" 2>&1
-    success "Build dependencies installed"
+  # Build guacd from source
+  local tar_file="/tmp/guacamole-server-${GUAC_VERSION}.tar.gz"
+  local src_dir="/tmp/guacamole-server-${GUAC_VERSION}"
+  download_with_fallback "$tar_file" \
+    "https://downloads.apache.org/guacamole/${GUAC_VERSION}/source/guacamole-server-${GUAC_VERSION}.tar.gz" \
+    "https://archive.apache.org/dist/guacamole/${GUAC_VERSION}/source/guacamole-server-${GUAC_VERSION}.tar.gz"
 
-    info "Downloading guacamole-server ${GUAC_VER}..."
-    wget -q "${GUAC_URL}" -O /tmp/guacamole-server.tar.gz >> "$LOG_FILE" 2>&1
-    tar -xzf /tmp/guacamole-server.tar.gz -C /tmp >> "$LOG_FILE" 2>&1
+  rm -rf "$src_dir"
+  run_cmd "Extracting guacamole-server" tar -xzf "$tar_file" -C /tmp
+  pushd "$src_dir" >/dev/null
+  run_cmd "Configuring guacd" ./configure --with-init-dir=/etc/init.d
+  run_cmd "Building guacd (this takes a few minutes)" make -j"$(nproc)"
+  run_cmd "Installing guacd" make install
+  popd >/dev/null
+  run_cmd "Updating shared library cache" ldconfig
+  rm -rf "$tar_file" "$src_dir"
 
-    info "Compiling guacd (this takes a few minutes)..."
-    cd "/tmp/guacamole-server-${GUAC_VER}"
-    ./configure --with-init-dir=/etc/init.d >> "$LOG_FILE" 2>&1
-    make -j"$(nproc)" >> "$LOG_FILE" 2>&1
-    make install >> "$LOG_FILE" 2>&1
-    ldconfig >> "$LOG_FILE" 2>&1
-    cd /
-    rm -rf /tmp/guacamole-server*
-    success "guacd compiled and installed"
+  # Deploy Guacamole WAR to Tomcat
+  local war_file="/tmp/guacamole-${GUAC_VERSION}.war"
+  download_with_fallback "$war_file" \
+    "https://downloads.apache.org/guacamole/${GUAC_VERSION}/binary/guacamole-${GUAC_VERSION}.war" \
+    "https://archive.apache.org/dist/guacamole/${GUAC_VERSION}/binary/guacamole-${GUAC_VERSION}.war"
+  mkdir -p /var/lib/tomcat10/webapps
+  cp "$war_file" /var/lib/tomcat10/webapps/guacamole.war
+  rm -f "$war_file"
+  success "Guacamole WAR deployed"
 
-    info "Downloading Guacamole web app..."
-    local WAR_URL="https://downloads.apache.org/guacamole/${GUAC_VER}/binary/guacamole-${GUAC_VER}.war"
-    wget -q "${WAR_URL}" -O /var/lib/tomcat10/webapps/guacamole.war >> "$LOG_FILE" 2>&1
-    success "Guacamole WAR deployed to Tomcat"
+  # Configure Guacamole
+  mkdir -p /etc/guacamole/{extensions,lib}
+  mkdir -p /usr/share/tomcat10/.guacamole
 
-    info "Configuring Guacamole..."
-    mkdir -p /etc/guacamole/{extensions,lib}
-    mkdir -p /usr/share/tomcat10/.guacamole
-
-    # Main config
-    cat > /etc/guacamole/guacamole.properties << GUACPROP
+  cat > /etc/guacamole/guacamole.properties <<'EOF'
 guacd-hostname: localhost
 guacd-port: 4822
 auth-provider: net.sourceforge.guacamole.net.basic.BasicFileAuthenticationProvider
 basic-user-mapping: /etc/guacamole/user-mapping.xml
-GUACPROP
+EOF
+  ln -sfn /etc/guacamole /usr/share/tomcat10/.guacamole
 
-    # Symlink for Tomcat
-    ln -sf /etc/guacamole /usr/share/tomcat10/.guacamole
+  local guac_pass
+  guac_pass="$(env_get GUACAMOLE_PASS || true)"
+  [[ -z "$guac_pass" ]] && guac_pass="$(openssl rand -hex 24)"
 
-    # Generate guacd user mapping — will be updated dynamically by COCO
-    cat > /etc/guacamole/user-mapping.xml << 'GUACXML'
+  cat > /etc/guacamole/user-mapping.xml <<EOF
 <user-mapping>
-    <authorize username="coco" password="coco_guac_placeholder">
+    <authorize username="coco" password="${guac_pass}">
     </authorize>
 </user-mapping>
-GUACXML
+EOF
+  chmod 640 /etc/guacamole/user-mapping.xml
 
-    chmod 640 /etc/guacamole/user-mapping.xml
-    chown root:tomcat /etc/guacamole/user-mapping.xml
+  # Set ownership for Tomcat group
+  local tgrp="tomcat"
+  getent group "$tgrp" >/dev/null 2>&1 || tgrp="tomcat10"
+  getent group "$tgrp" >/dev/null 2>&1 || tgrp="root"
+  chown root:"$tgrp" /etc/guacamole/user-mapping.xml
 
-    info "Enabling guacd and Tomcat services..."
-    systemctl daemon-reload >> "$LOG_FILE" 2>&1
-    systemctl enable --now guacd >> "$LOG_FILE" 2>&1
-    systemctl enable --now tomcat10 >> "$LOG_FILE" 2>&1
+  run_cmd "Enabling guacd" systemctl enable --now guacd
+  run_cmd "Enabling Tomcat 10" systemctl enable --now tomcat10
 
-    # Save guac token to env
-    local guac_pass
-    guac_pass=$(openssl rand -hex 16)
-    echo "GUACAMOLE_URL=http://localhost:8080/guacamole" >> "${COCO_DIR}/.env"
-    echo "GUACAMOLE_PASS=${guac_pass}" >> "${COCO_DIR}/.env"
-
-    success "Guacamole running at http://localhost:8080/guacamole"
-    success "Access via COCO proxy at https://${COCO_IP}/terminal"
-
-    save_state "guacamole"
+  env_set GUACAMOLE_URL  "http://localhost:8080/guacamole"
+  env_set GUACAMOLE_PASS "$guac_pass"
+  success "Guacamole accessible at http://localhost:8080/guacamole"
 }
 
-
-install_ansible() {
-    done_state "ansible" && { success "Ansible: already installed"; progress; return; }
-    step "Installing Ansible"
-    progress
-
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        ansible ansible-core \
-        >> "$LOG_FILE" 2>&1
-    success "Ansible: $(ansible --version | head -1)"
-
-    save_state "ansible"
+step_ansible() {
+  run_cmd "Installing Ansible" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ansible ansible-core
+  command -v ansible >/dev/null 2>&1 && success "$(ansible --version | head -n1)"
 }
 
-# ── Packer ─────────────────────────────────────────────────
-install_packer() {
-    done_state "packer" && { success "Packer: already installed"; progress; return; }
-    step "Installing Packer"
-    progress
-
-    local PACKER_VER="1.11.0"
-    wget -q \
-        "https://releases.hashicorp.com/packer/${PACKER_VER}/packer_${PACKER_VER}_linux_amd64.zip" \
-        -O /tmp/packer.zip >> "$LOG_FILE" 2>&1
-    unzip -q /tmp/packer.zip -d /usr/local/bin/
-    rm -f /tmp/packer.zip
-    chmod +x /usr/local/bin/packer
-    success "Packer: $(packer --version)"
-
-    save_state "packer"
+step_packer() {
+  local arch
+  arch="$(dpkg --print-architecture)"
+  [[ "$arch" == "amd64" || "$arch" == "arm64" ]] || fail "Unsupported arch for Packer: $arch"
+  local zip="/tmp/packer.zip"
+  run_cmd "Downloading Packer ${PACKER_VERSION}" wget -q \
+    "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${arch}.zip" \
+    -O "$zip"
+  run_cmd "Installing Packer" unzip -o -q "$zip" -d /usr/local/bin/
+  rm -f "$zip"
+  chmod +x /usr/local/bin/packer
+  success "Packer: $(packer --version | head -n1)"
 }
 
-# ── Node.js ────────────────────────────────────────────────
-install_node() {
-    done_state "node" && { success "Node.js: already installed"; progress; return; }
-    step "Installing Node.js"
-    progress
-
-    info "Adding Node.js 22 LTS repository..."
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >> "$LOG_FILE" 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs >> "$LOG_FILE" 2>&1
-    success "Node.js: $(node --version)  npm: $(npm --version)"
-
-    save_state "node"
+step_node() {
+  run_cmd "Adding Node.js ${NODE_MAJOR}.x repository" \
+    bash -c "curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash -"
+  run_cmd "Installing Node.js" env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+  success "Node.js: $(node --version)  npm: $(npm --version)"
 }
 
-# ── Frontend build ──────────────────────────────────────────
-build_frontend() {
-    done_state "frontend" && { success "Frontend: already built"; progress; return; }
-    step "Building React frontend"
-    progress
-
-    local frontend_dir="${COCO_DIR}/repo/web/frontend"
-
-    if [[ ! -d "$frontend_dir" ]]; then
-        warn "Frontend source not found at ${frontend_dir} — skipping build"
-        return
-    fi
-
-    info "Installing npm dependencies..."
-    cd "$frontend_dir"
-    npm install --silent >> "$LOG_FILE" 2>&1
-    success "npm packages installed"
-
-    info "Building production bundle..."
-    npm run build >> "$LOG_FILE" 2>&1
-    success "Frontend built → ${frontend_dir}/dist"
-
-    save_state "frontend"
+step_ssl() {
+  mkdir -p "$COCO_SSL_DIR"
+  if [[ -f "${COCO_SSL_DIR}/coco.crt" && -f "${COCO_SSL_DIR}/coco.key" ]]; then
+    success "SSL certificate already exists"
+    return 0
+  fi
+  run_cmd "Generating self-signed SSL certificate (365 days)" openssl req -x509 -nodes \
+    -days 365 -newkey rsa:2048 \
+    -keyout "${COCO_SSL_DIR}/coco.key" \
+    -out    "${COCO_SSL_DIR}/coco.crt" \
+    -subj   "/C=CH/ST=COCO/L=COCO/O=COCO/CN=${COCO_IP}"
+  chmod 600 "${COCO_SSL_DIR}/coco.key"
 }
 
-# ── Deploy COCO service ─────────────────────────────────────
-deploy_service() {
-    done_state "service" && { success "COCO service: already deployed"; progress; return; }
-    step "Deploying COCO systemd service"
-    progress
+step_frontend() {
+  local frontend
+  frontend="$(frontend_dir)"
+  if [[ ! -d "$frontend" ]]; then
+    warn "Frontend source not found at $frontend — skipping"
+    return 0
+  fi
+  pushd "$frontend" >/dev/null
+  if [[ -f package-lock.json ]]; then
+    run_cmd "Installing frontend dependencies (npm ci)" npm ci --silent
+  else
+    run_cmd "Installing frontend dependencies (npm install)" npm install --silent
+  fi
+  run_cmd "Building React/Vite frontend" npm run build
+  popd >/dev/null
+  success "Frontend built at ${frontend}/dist"
+}
 
-    local service_src="${COCO_DIR}/repo/web/backend/coco.service"
+step_dbinit() {
+  local backend
+  backend="$(backend_dir)"
+  [[ -d "$backend" ]] || fail "Backend dir missing: $backend"
+  load_env_file
 
-    if [[ -f "$service_src" ]]; then
-        cp "$service_src" /etc/systemd/system/coco.service
-    else
-        cat > /etc/systemd/system/coco.service << SVCEOF
+  info "Initialising database schema"
+  PYTHONPATH="$backend" "$COCO_VENV_DIR/bin/python3" <<'PY'
+import importlib, os, sys
+backend = os.environ.get('PYTHONPATH', '/opt/coco/repo/web/backend')
+sys.path.insert(0, backend)
+from core.database import Base, engine
+for mod in ('models.user', 'models.game'):
+    try:    importlib.import_module(mod)
+    except Exception as e: print(f'WARN: {mod}: {e}')
+Base.metadata.create_all(bind=engine)
+print('Schema initialised.')
+PY
+}
+
+step_admin() {
+  local backend
+  backend="$(backend_dir)"
+  [[ -d "$backend" ]] || fail "Backend dir missing: $backend"
+  load_env_file
+
+  info "Creating/updating admin user: ${COCO_ADMIN_EMAIL}"
+  COCO_ADMIN_EMAIL="$COCO_ADMIN_EMAIL" \
+  COCO_ADMIN_PASSWORD="$COCO_ADMIN_PASSWORD" \
+  PYTHONPATH="$backend" \
+  "$COCO_VENV_DIR/bin/python3" <<'PY'
+import os, sys
+backend = os.environ.get('PYTHONPATH', '/opt/coco/repo/web/backend')
+sys.path.insert(0, backend)
+from core.database import SessionLocal
+from core.security import hash_password
+from models.user import User, UserRole
+email    = os.environ['COCO_ADMIN_EMAIL']
+password = os.environ['COCO_ADMIN_PASSWORD']
+db = SessionLocal()
+try:
+    u = db.query(User).filter(User.email == email).first()
+    if u:
+        u.hashed_password = hash_password(password)
+        u.role = UserRole.admin
+        u.is_active = True
+        db.commit()
+        print('Admin updated.')
+    else:
+        db.add(User(email=email, username='admin',
+                    hashed_password=hash_password(password),
+                    role=UserRole.admin, is_active=True))
+        db.commit()
+        print('Admin created.')
+finally:
+    db.close()
+PY
+  success "Admin user ready: ${COCO_ADMIN_EMAIL}"
+}
+
+step_service() {
+  local backend
+  backend="$(backend_dir)"
+
+  cat > /etc/systemd/system/coco.service <<EOF
 [Unit]
 Description=COCO Attack & Defense Platform
-After=network.target postgresql.service redis.service
-Requires=postgresql.service redis.service
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+Requires=postgresql.service redis-server.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=${COCO_DIR}/repo/web/backend
-ExecStart=${COCO_DIR}/venv/bin/uvicorn main:app \\
-    --host 0.0.0.0 \\
-    --port 443 \\
-    --ssl-certfile ${COCO_DIR}/ssl/coco.crt \\
-    --ssl-keyfile ${COCO_DIR}/ssl/coco.key \\
-    --workers 4 \\
-    --access-log \\
-    --log-level info
+WorkingDirectory=${backend}
+EnvironmentFile=${COCO_ENV_FILE}
+Environment=PYTHONPATH=${backend}
+Environment=COCO_APP_VERSION=${COCO_APP_VERSION}
+ExecStart=${COCO_VENV_DIR}/bin/uvicorn main:app \\
+  --host 0.0.0.0 \\
+  --port 443 \\
+  --ssl-certfile ${COCO_SSL_DIR}/coco.crt \\
+  --ssl-keyfile ${COCO_SSL_DIR}/coco.key \\
+  --workers 4 \\
+  --access-log \\
+  --log-level info
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-Environment=PYTHONPATH=${COCO_DIR}/repo/web/backend
 
 [Install]
 WantedBy=multi-user.target
-SVCEOF
-    fi
+EOF
 
-    systemctl daemon-reload >> "$LOG_FILE" 2>&1
-    systemctl enable coco >> "$LOG_FILE" 2>&1
-    systemctl start coco >> "$LOG_FILE" 2>&1 || true
+  run_cmd "Reloading systemd" systemctl daemon-reload
+  run_cmd "Enabling COCO service" systemctl enable coco.service
+  run_cmd_allow_fail "Starting COCO service" systemctl restart coco.service
 
-    sleep 2
-    if systemctl is-active --quiet coco; then
-        success "COCO service running on port 443"
-    else
-        warn "COCO service failed to start — check: journalctl -xeu coco"
-    fi
-
-    save_state "service"
-}
-# ── DB Schema init ─────────────────────────────────────────
-init_database() {
-    done_state "dbinit" && { success "Database schema: already initialized"; progress; return; }
-    step "Initializing database schema"
-    progress
-
-    info "Creating tables..."
-    PYTHONPATH="${COCO_DIR}/repo/web/backend" \
-    "${COCO_DIR}/venv/bin/python3" << 'PYEOF'
-import sys
-sys.path.insert(0, '/opt/coco/repo/web/backend')
-from core.database import engine, Base
-from models.user import User
-from models.game import Game, Team, VM, GameEvent, AuditLog
-Base.metadata.create_all(bind=engine)
-print("Tables created.")
-PYEOF
-    success "Database schema initialized"
-    save_state "dbinit"
+  sleep 3
+  if systemctl is-active --quiet coco.service; then
+    success "COCO service running on port 443"
+  else
+    warn "COCO service not active — check: journalctl -xeu coco.service"
+  fi
 }
 
-# ── Create admin user ──────────────────────────────────────
-create_admin() {
-    done_state "admin" && { success "Admin user: already created"; progress; return; }
-    step "Creating admin user"
-    progress
-
-    info "Creating admin: ${COCO_ADMIN_EMAIL}..."
-    PYTHONPATH="${COCO_DIR}/repo/web/backend" \
-    "${COCO_DIR}/venv/bin/python3" << PYEOF
-import sys
-sys.path.insert(0, '/opt/coco/repo/web/backend')
-from core.database import SessionLocal
-from core.security import hash_password
-from models.user import User, UserRole
-db = SessionLocal()
-existing = db.query(User).filter(User.email == '${COCO_ADMIN_EMAIL}').first()
-if existing:
-    print("Admin already exists.")
-else:
-    admin = User(
-        email='${COCO_ADMIN_EMAIL}',
-        username='admin',
-        hashed_password=hash_password('${COCO_ADMIN_PASSWORD}'),
-        role=UserRole.admin,
-        is_active=True,
-    )
-    db.add(admin)
-    db.commit()
-    print("Admin created.")
-db.close()
-PYEOF
-    success "Admin user ready: ${COCO_ADMIN_EMAIL}"
-    save_state "admin"
+remove_resume_service() {
+  if [[ -f "$COCO_RESUME_SERVICE" ]]; then
+    run_cmd_allow_fail "Disabling resume service" systemctl disable coco-install-resume.service
+    rm -f "$COCO_RESUME_SERVICE"
+    run_cmd_allow_fail "Reloading systemd" systemctl daemon-reload
+  fi
 }
 
-# ── SSL Certificate ────────────────────────────────────────
-setup_ssl() {
-    done_state "ssl" && { success "SSL: already configured"; progress; return; }
-    step "Generating SSL certificate"
-    progress
-
-    mkdir -p "${COCO_DIR}/ssl"
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-        -keyout "${COCO_DIR}/ssl/coco.key" \
-        -out "${COCO_DIR}/ssl/coco.crt" \
-        -subj "/C=CH/ST=COCO/L=COCO/O=COCO/CN=${COCO_IP}" \
-        >> "$LOG_FILE" 2>&1
-    chmod 600 "${COCO_DIR}/ssl/coco.key"
-    success "SSL certificate generated (self-signed, 365 days)"
-
-    save_state "ssl"
-}
-
-# ── COCO directories + env ─────────────────────────────────
-setup_coco() {
-    done_state "coco" && { success "COCO dirs: already set up"; progress; return; }
-    step "Setting up COCO"
-    progress
-
-    mkdir -p "${COCO_DIR}"/{backend,frontend,ansible,packer,ssl,logs}
-
-    cat > "${COCO_DIR}/.env" << ENVEOF
-# COCO Environment — generated $(date)
-SECRET_KEY=${SECRET_KEY}
-COCO_IP=${COCO_IP}
-COCO_PORT=443
-PVE_HOSTNAME=${PVE_HOSTNAME}
-PVE_NODE=${PVE_HOSTNAME}
-PROXMOX_HOST=${COCO_IP}
-PROXMOX_USER=root@pam
-PROXMOX_PASSWORD=${PVE_ROOT_PASSWORD}
-PROXMOX_NODE=${PVE_HOSTNAME}
-COCO_REPO_DIR=${COCO_DIR}/repo
-SSL_CERT=${COCO_DIR}/ssl/coco.crt
-SSL_KEY=${COCO_DIR}/ssl/coco.key
-ENVEOF
-    chmod 600 "${COCO_DIR}/.env"
-    success "Environment config written"
-
-    info "Cloning COCO repository..."
-    if [[ ! -d "${COCO_DIR}/repo/.git" ]]; then
-        git clone https://github.com/Tox1cfnbr7/coco.git \
-            "${COCO_DIR}/repo" >> "$LOG_FILE" 2>&1
-    else
-        info "Repo already cloned — pulling latest..."
-        git -C "${COCO_DIR}/repo" pull >> "$LOG_FILE" 2>&1
-    fi
-    success "Repository ready at ${COCO_DIR}/repo"
-
-    save_state "coco"
-}
-
-# ── Done ───────────────────────────────────────────────────
 print_done() {
-    remove_resume_service
-    rm -f "${COCO_DIR}/.install-config"
-    save_state "complete"
+  remove_resume_service
+  rm -f "$COCO_CONFIG_FILE" "$CURRENT_STEP_FILE"
+  write_version_file
+  echo "complete" > "$STATE_FILE"
 
-    echo ""
-    echo -e "${GREEN}"
-    cat << 'DONE'
+  echo ""
+  printf '%b' "$GREEN"
+  cat <<'DONE'
   ────────────────────────────────────────────────
    COCO installation complete.
   ────────────────────────────────────────────────
 DONE
-    echo -e "${RESET}"
-    echo -e "  ${BOLD}COCO Web-GUI${RESET}  :  ${CYAN}https://${COCO_IP}${RESET}"
-    echo -e "  ${BOLD}Proxmox GUI${RESET}   :  ${CYAN}https://${COCO_IP}:8006${RESET}"
-    echo ""
-    echo -e "  ${BOLD}Admin login${RESET}"
-    echo -e "  Email     :  ${COCO_ADMIN_EMAIL}"
-    echo -e "  Password  :  (the one you set during install)"
-    echo ""
-    echo -e "  ${BOLD}Service${RESET}       :  systemctl status coco"
-    echo -e "  ${BOLD}Logs${RESET}          :  journalctl -xeu coco"
-    echo -e "  ${BOLD}Config${RESET}        :  ${COCO_DIR}/.env"
-    echo ""
-    divider
-    echo ""
+  printf '%b' "$RESET"
+  echo ""
+  printf '  COCO Web-GUI :  https://%s\n'      "$COCO_IP"
+  printf '  Proxmox GUI  :  https://%s:8006\n' "$COCO_IP"
+  echo ""
+  echo "  Admin login"
+  printf '  Email        :  %s\n' "$COCO_ADMIN_EMAIL"
+  echo "  Password     :  (set during install)"
+  echo ""
+  echo "  Useful commands:"
+  echo "  systemctl status coco"
+  echo "  journalctl -xeu coco"
+  printf '  %s\n' "$LOG_FILE"
+  echo ""
+  divider
 }
 
-# ── Main flow ──────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────
 run_all() {
-    install_bootstrap
-    install_proxmox
-    reboot_for_kernel
-    configure_system
-    setup_coco
-    install_backend
-    install_postgres
-    install_redis
-    install_guacamole
-    install_ansible
-    install_packer
-    install_node
-    setup_ssl
-    build_frontend
-    init_database
-    create_admin
-    deploy_service
-    print_done
+  with_step bootstrap      "Installing bootstrap dependencies"          step_bootstrap
+  with_step proxmox        "Installing Proxmox VE 9"                   step_proxmox
+  with_step kernel_reboot  "Activating Proxmox kernel"                 step_kernel_reboot
+  with_step sysconfig      "Configuring system"                        step_sysconfig
+  with_step coco           "Setting up COCO repository"                step_coco
+  with_step backend        "Installing FastAPI backend"                step_backend
+  with_step postgres       "Installing PostgreSQL"                     step_postgres
+  with_step redis          "Installing Redis"                          step_redis
+  with_step guacamole      "Installing Apache Guacamole"              step_guacamole
+  with_step ansible        "Installing Ansible"                        step_ansible
+  with_step packer         "Installing Packer"                         step_packer
+  with_step node           "Installing Node.js ${NODE_MAJOR}"          step_node
+  with_step ssl            "Generating SSL certificate"                step_ssl
+  with_step frontend       "Building React frontend"                   step_frontend
+  with_step dbinit         "Initialising database schema"              step_dbinit
+  with_step admin          "Creating admin user"                       step_admin
+  with_step service        "Deploying COCO service"                    step_service
+  print_done
 }
 
 main() {
-    mkdir -p "$(dirname "$LOG_FILE")"
-    mkdir -p "${COCO_DIR}"
-    print_logo
+  parse_args "$@"
+  ensure_runtime_dirs
+  print_logo
+  require_root
 
-    if [[ "${1:-}" == "--resume" ]]; then
-        info "Resuming after reboot..."
-        load_config
-        run_all
-        return
-    fi
-
-    check_root
-    check_os
-    collect_config
+  if [[ "$RESUME" == "1" ]]; then
+    info "Resuming after reboot"
+    load_install_config
     run_all
+    return 0
+  fi
+
+  check_os
+  collect_config
+  run_all
 }
 
-main "${@}"
+main "$@"

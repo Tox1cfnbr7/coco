@@ -1,19 +1,17 @@
 ---
-# COCO — deploy-session.yml
-# Called by SessionManager after VMs are cloned and booted.
-# Variables passed via --extra-vars @vuln-vars.json:
-#   coco_game_id, coco_mode, coco_active_vulns (list), coco_flags (list)
+# COCO — deploy-session.yml v2
+# Extended with SIEM stack, Sysmon, Wazuh agents, AD CS
 
 - name: Wait for all VMs to be reachable
   hosts: all
   gather_facts: false
   tasks:
-    - name: Wait for SSH/WinRM connection
+    - name: Wait for connection
       ansible.builtin.wait_for_connection:
         timeout: 300
         sleep: 10
 
-- name: Configure Domain Controller (Primary)
+- name: Configure Primary Domain Controller (DC-01)
   hosts: dc-primary
   gather_facts: true
   roles:
@@ -23,6 +21,18 @@
     domain_name: corp.coco.local
     domain_netbios: CORP
     admin_password: "Coco2024!"
+
+- name: Configure Secondary DC + Certificate Authority (DC-02)
+  hosts: dc-secondary
+  gather_facts: true
+  roles:
+    - common
+    - dc-secondary
+  vars:
+    domain_name: corp.coco.local
+    admin_password: "Coco2024!"
+    dc_primary_ip: "{{ hostvars['dc01']['ansible_host'] }}"
+    corp_ca_name: "COCO-Corp-CA"
 
 - name: Configure MSSQL Server
   hosts: dc-mssql
@@ -48,27 +58,58 @@
     - common
     - linux-vuln
 
-- name: Configure Workstation
+- name: Configure File Server
+  hosts: fileserver
+  gather_facts: true
+  roles:
+    - common
+    - srv-file
+
+- name: Configure Workstations
   hosts: workstation
   gather_facts: true
   roles:
     - common
+  vars:
+    domain_name: corp.coco.local
+    admin_password: "Coco2024!"
+
+- name: Start SIEM Stack
+  hosts: siem
+  gather_facts: true
+  roles:
+    - siem-stack
+
+- name: Install Sysmon on all Windows VMs
+  hosts: dc-primary,dc-secondary,dc-mssql,workstation,fileserver
+  gather_facts: false
+  roles:
+    - sysmon
+
+- name: Deploy Wazuh agents on all VMs (point to SIEM)
+  hosts: dc-primary,dc-secondary,dc-mssql,web,linux,workstation,fileserver
+  gather_facts: false
+  roles:
+    - wazuh-agent
+  vars:
+    siem_ip: "{{ hostvars['siem']['ansible_host'] | default('') }}"
+  when: hostvars['siem'] is defined
 
 - name: Inject Vulnerabilities
   hosts: all
   gather_facts: false
   tasks:
-    - name: Run vuln injection per host
+    - name: Run vuln injection
       ansible.builtin.include_role:
         name: vulns
       vars:
         active_vulns: "{{ coco_active_vulns }}"
 
-- name: Place flags on services
+- name: Place flags
   hosts: all
   gather_facts: false
   tasks:
-    - name: Place flag files
+    - name: Place flag files on services
       ansible.builtin.include_tasks: roles/common/tasks/place_flags.yml
       vars:
         game_flags: "{{ coco_flags }}"

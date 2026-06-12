@@ -1,0 +1,43 @@
+---
+- name: Set vm.max_map_count for Elasticsearch
+  ansible.posix.sysctl:
+    name: vm.max_map_count
+    value: "262144"
+    state: present
+    reload: yes
+
+- name: Start SIEM services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: yes
+    state: started
+  loop:
+    - elasticsearch
+    - kibana
+    - wazuh-manager
+    - suricata
+
+- name: Wait for Elasticsearch
+  ansible.builtin.uri:
+    url: "http://localhost:9200/_cluster/health"
+    status_code: 200
+  retries: 30
+  delay: 10
+
+- name: Create Wazuh index pattern in Kibana
+  ansible.builtin.uri:
+    url: "http://localhost:5601/api/saved_objects/index-pattern/wazuh-alerts-*"
+    method: POST
+    body_format: json
+    body: {"attributes": {"title": "wazuh-alerts-*", "timeFieldName": "@timestamp"}}
+    headers: {"kbn-xsrf": "true"}
+    status_code: [200, 409]
+  retries: 10
+  delay: 15
+  ignore_errors: true
+
+- name: Print SIEM access info
+  ansible.builtin.debug:
+    msg:
+      - "Kibana:        http://{{ ansible_host }}:5601"
+      - "Elasticsearch: http://{{ ansible_host }}:9200"

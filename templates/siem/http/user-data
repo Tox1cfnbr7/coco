@@ -1,0 +1,39 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  network:
+    network:
+      version: 2
+      ethernets:
+        ens18:
+          dhcp4: true
+  storage:
+    layout:
+      name: direct
+  identity:
+    hostname: siem
+    username: root
+    password: "$6$rounds=4096$saltsalt$hashedpassword"
+    realname: COCO SIEM
+  ssh:
+    install-server: yes
+    allow-pw: yes
+  packages:
+    - openssh-server
+    - curl
+    - wget
+    - python3
+  user-data:
+    chpasswd:
+      list: |
+        root:coco2024
+      expire: false
+    ssh_pwauth: true
+    disable_root: false
+    runcmd:
+      - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+      - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+      - systemctl restart ssh

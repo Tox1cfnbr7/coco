@@ -19,6 +19,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
 
+from services.vm_config import TEMPLATES, GAME_VMS
 from services.proxmox import get_proxmox
 from models.game import (
     Game, Team, VM, GameEvent, ServiceCheck, CapturedFlag,

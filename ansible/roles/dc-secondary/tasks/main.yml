@@ -1,0 +1,30 @@
+---
+- name: Wait for DC-01 LDAP
+  ansible.windows.win_wait_for:
+    host: "{{ dc_primary_ip }}"
+    port: 389
+    timeout: 300
+
+- name: Promote as additional DC
+  ansible.windows.win_shell: |
+    $cred = New-Object System.Management.Automation.PSCredential(
+      "Administrator@{{ domain_name }}",
+      (ConvertTo-SecureString "{{ admin_password }}" -AsPlainText -Force))
+    Install-ADDSDomainController -DomainName "{{ domain_name }}" -Credential $cred `
+      -InstallDns:$true -Force:$true -NoRebootOnCompletion:$false
+  ignore_errors: true
+
+- name: Wait after reboot
+  ansible.builtin.wait_for_connection:
+    delay: 60
+    timeout: 300
+
+- name: Install AD Certificate Services (Enterprise Root CA)
+  ansible.windows.win_shell: |
+    Install-AdcsCertificationAuthority -CAType EnterpriseRootCa `
+      -CACommonName "{{ corp_ca_name | default('COCO-Corp-CA') }}" `
+      -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
+      -KeyLength 2048 -HashAlgorithmName SHA256 `
+      -ValidityPeriod Years -ValidityPeriodUnits 10 -Force
+    Install-AdcsWebEnrollment -Force
+  ignore_errors: true

@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # ============================================================
-#   COCO — Template Builder
-#   Builds all Proxmox VM templates via Packer.
-#   ISOs are downloaded automatically — no manual uploads needed.
+#   COCO — Template Builder v2
+#   All ISOs downloaded automatically — no manual uploads.
 #
 #   Usage:
-#     bash build-templates.sh              # interactive menu
-#     bash build-templates.sh --all        # build everything
+#     bash build-templates.sh              # menu
+#     bash build-templates.sh --all        # all templates
 #     bash build-templates.sh --template kali
 #     bash build-templates.sh --template debian12
 #     bash build-templates.sh --template win2022
 #     bash build-templates.sh --template win10
+#     bash build-templates.sh --template dc02-ca
+#     bash build-templates.sh --template siem
 #
-#   After first build, note the VMIDs Proxmox assigned and update
-#   TEMPLATES in web/backend/services/session_manager.py
+#   After building, note VMIDs and update TEMPLATES in
+#   web/backend/services/vm_config.py
 # ============================================================
 set -Eeuo pipefail
 
@@ -21,26 +22,42 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="/var/log/coco"
 LOG_FILE="${LOG_DIR}/packer-build.log"
 
-# ── Colors ──────────────────────────────────────────────────
 if [[ -t 1 ]]; then
   RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
   CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
 else
   RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; RESET=''
 fi
+
 info()    { printf '%b  [*]%b %s\n' "$CYAN"   "$RESET" "$*" | tee -a "$LOG_FILE"; }
 success() { printf '%b  [+]%b %s\n' "$GREEN"  "$RESET" "$*" | tee -a "$LOG_FILE"; }
 warn()    { printf '%b  [!]%b %s\n' "$YELLOW" "$RESET" "$*" | tee -a "$LOG_FILE"; }
 fail()    { printf '%b  [-] %s%b\n' "$RED"    "$*" "$RESET" | tee -a "$LOG_FILE"; exit 1; }
-section() { echo ""; printf '%b  >> %s%b\n' "${BOLD}${CYAN}" "$*" "$RESET"; echo ""; }
 
-mkdir -p "$LOG_DIR"
-touch "$LOG_FILE"
+mkdir -p "$LOG_DIR" && touch "$LOG_FILE"
+
+# ── Template map: key → directory name ─────────────────────
+# MUST match the folder names in templates/
+declare -A TEMPLATE_DIRS=(
+  [kali]="kali"
+  [debian12]="debian12"
+  [win2022]="windows-server-2022"
+  [win10]="windows-10"
+  [dc02-ca]="dc02-ca"
+  [siem]="siem"
+)
+
+declare -A TEMPLATE_LABELS=(
+  [kali]="Kali Linux 2024"
+  [debian12]="Debian 12 (Web/Linux base)"
+  [win2022]="Windows Server 2022 (DC/MSSQL)"
+  [win10]="Windows 10 Workstation"
+  [dc02-ca]="Windows Server 2022 (DC-02 + AD CS)"
+  [siem]="SIEM Stack (Elastic + Wazuh + Kibana)"
+)
 
 # ── Load COCO config ────────────────────────────────────────
-if [[ -f /opt/coco/.env ]]; then
-  set -a; source /opt/coco/.env; set +a
-fi
+[[ -f /opt/coco/.env ]] && { set -a; source /opt/coco/.env; set +a; }
 
 PROXMOX_URL="${PROXMOX_URL:-https://127.0.0.1:8006/api2/json}"
 PROXMOX_USER="${PROXMOX_USER:-root@pam}"
@@ -49,57 +66,60 @@ PROXMOX_PASSWORD="${PROXMOX_PASSWORD:-${PVE_ROOT_PASSWORD:-}}"
 PROXMOX_STORAGE="${PROXMOX_STORAGE:-local-lvm}"
 ISO_STORAGE="${ISO_STORAGE:-local}"
 
-# ── Argument parsing ────────────────────────────────────────
-BUILD_ALL=0
-TEMPLATE=""
+# ── Args ────────────────────────────────────────────────────
+BUILD_ALL=0; TEMPLATE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all)        BUILD_ALL=1 ;;
     --template)   TEMPLATE="$2"; shift ;;
     -h|--help)
-      echo "Usage: $0 [--all] [--template kali|debian12|win2022|win10]"
+      echo "Usage: $0 [--all] [--template kali|debian12|win2022|win10|dc02-ca|siem]"
       exit 0 ;;
   esac
   shift
 done
 
-# ── Check prerequisites ─────────────────────────────────────
-check_prereqs() {
-  command -v packer  >/dev/null 2>&1 || fail "Packer not found. Run install.sh first."
-  command -v curl    >/dev/null 2>&1 || fail "curl not found"
-  [[ ${EUID:-$(id -u)} -eq 0 ]] || fail "Run as root"
-}
+# ── Checks ──────────────────────────────────────────────────
+command -v packer >/dev/null 2>&1 || fail "Packer not found — run install.sh first"
+[[ ${EUID:-$(id -u)} -eq 0 ]] || fail "Run as root"
 
-# ── Collect Proxmox credentials if not set ──────────────────
-collect_credentials() {
-  if [[ -z "$PROXMOX_PASSWORD" ]]; then
-    read -rsp "  Proxmox root password: " PROXMOX_PASSWORD; echo ""
-  fi
+if [[ -z "$PROXMOX_PASSWORD" ]]; then
+  read -rsp "  Proxmox password: " PROXMOX_PASSWORD; echo ""
+fi
 
-  # Test connection
-  local rc
-  rc=$(curl -sk -o /dev/null -w "%{http_code}" \
-    --data "username=${PROXMOX_USER}&password=${PROXMOX_PASSWORD}" \
-    "${PROXMOX_URL}/access/ticket" 2>/dev/null)
-  [[ "$rc" == "200" ]] || fail "Cannot connect to Proxmox at ${PROXMOX_URL} (HTTP $rc)"
-  success "Proxmox connection verified"
-}
+# Test Proxmox connection
+rc=$(curl -sk -o /dev/null -w "%{http_code}" \
+  --data "username=${PROXMOX_USER}&password=${PROXMOX_PASSWORD}" \
+  "${PROXMOX_URL}/access/ticket")
+[[ "$rc" == "200" ]] || fail "Cannot reach Proxmox ($rc) — check credentials"
+success "Proxmox connection OK"
 
-# ── Packer build function ───────────────────────────────────
+# ── Build function ──────────────────────────────────────────
 build_template() {
-  local name="$1"
-  local dir="${SCRIPT_DIR}/${name}"
+  local key="$1"
+  local dir_name="${TEMPLATE_DIRS[$key]:-}"
+  local label="${TEMPLATE_LABELS[$key]:-$key}"
 
-  [[ -d "$dir" ]] || fail "Template directory not found: $dir"
+  [[ -n "$dir_name" ]] || fail "Unknown template key: '$key'. Valid: ${!TEMPLATE_DIRS[*]}"
 
-  section "Building template: ${name}"
-  info "Initialising Packer plugins..."
-  cd "$dir"
-  packer init . >> "$LOG_FILE" 2>&1
+  local tpl_dir="${SCRIPT_DIR}/${dir_name}"
+  [[ -d "$tpl_dir" ]] || fail "Template directory not found: $tpl_dir"
 
-  info "Building ${name} (this may take 30-90 minutes)..."
-  info "Live log: tail -f ${LOG_FILE}"
+  local log="/var/log/coco/packer-${key}.log"
+  local pid_file="/var/run/coco-packer-${key}.pid"
+
+  echo "" | tee -a "$LOG_FILE"
+  printf '%b  >> Building: %s%b\n' "${BOLD}${CYAN}" "$label" "$RESET" | tee -a "$LOG_FILE"
+  info "Directory: $tpl_dir"
+  info "Log file:  $log"
+  info "Watch progress: tail -f $log"
+
+  cd "$tpl_dir"
+  packer init . >> "$log" 2>&1
+
+  # Write PID file before build starts
+  echo $$ > "$pid_file"
 
   PACKER_LOG=1 packer build \
     -var "proxmox_url=${PROXMOX_URL}" \
@@ -109,25 +129,34 @@ build_template() {
     -var "proxmox_storage=${PROXMOX_STORAGE}" \
     -var "iso_storage=${ISO_STORAGE}" \
     -on-error=cleanup \
-    . 2>&1 | tee -a "$LOG_FILE"
+    . 2>&1 | tee -a "$log" | tee -a "$LOG_FILE"
 
   local rc=${PIPESTATUS[0]}
+  rm -f "$pid_file"
   cd "$SCRIPT_DIR"
 
   if [[ $rc -eq 0 ]]; then
-    success "Template '${name}' built successfully!"
-    # Print the VMID from the log
+    success "Template '${label}' built!"
+    # Find the VMID
     local vmid
-    vmid=$(grep -o 'VM ID: [0-9]*\|vmid=[0-9]*\|new vm.*id [0-9]*' "$LOG_FILE" \
-           | tail -1 | grep -o '[0-9]*$' || true)
-    [[ -n "$vmid" ]] && success "VMID: ${vmid} — update session_manager.py TEMPLATES dict"
+    vmid=$(grep -oP 'vmid: \K[0-9]+' "$log" 2>/dev/null | tail -1 || \
+           grep -oP '"vmid":\K[0-9]+' "$log" 2>/dev/null | tail -1 || echo "?")
+    [[ "$vmid" != "?" ]] && success "VMID: $vmid  →  update vm_config.py TEMPLATES['${key}'] = ${vmid}"
   else
-    warn "Template '${name}' build failed (exit $rc). Check: $LOG_FILE"
+    warn "Build failed for '${label}' (exit $rc). Check: $log"
     return $rc
   fi
 }
 
-# ── Interactive menu ─────────────────────────────────────────
+print_vmids() {
+  echo ""
+  info "Current templates on Proxmox:"
+  qm list 2>/dev/null | grep -E "coco-tpl|VMID" || true
+  echo ""
+  info "Update TEMPLATES in web/backend/services/vm_config.py with the VMID numbers above."
+}
+
+# ── Menu ────────────────────────────────────────────────────
 show_menu() {
   printf '%b' "$CYAN"
   cat << 'LOGO'
@@ -136,71 +165,50 @@ show_menu() {
  ██║      ██║   ██║██║      ██║   ██║
  ╚██████╗ ╚██████╔╝╚██████╗ ╚██████╔╝
   ╚═════╝  ╚═════╝  ╚═════╝  ╚═════╝
-         Template Builder
+         Template Builder v2
 LOGO
-  printf '%b' "$RESET"
-  echo ""
-  printf '  Proxmox : %s\n' "$PROXMOX_URL"
-  printf '  Node    : %s\n' "$PROXMOX_NODE"
-  printf '  Storage : %s\n' "$PROXMOX_STORAGE"
-  echo ""
+  printf '%b  Node: %s  |  Storage: %s%b\n\n' "$RESET$CYAN" "$PROXMOX_NODE" "$PROXMOX_STORAGE" "$RESET"
   echo "  Templates:"
-  echo "    1) kali          — Kali Linux 2024 (Red Team attacker)"
-  echo "    2) debian12      — Debian 12 (Web/Linux service VMs)"
-  echo "    3) win2022       — Windows Server 2022 (DC + MSSQL)"
-  echo "    4) win10         — Windows 10 (Workstation)"
-  echo "    a) All templates"
+  echo "    1) kali     — Kali Linux 2024 (Red Team)"
+  echo "    2) debian12  — Debian 12 (Web / Linux Services)"
+  echo "    3) win2022   — Windows Server 2022 (DC + MSSQL)"
+  echo "    4) win10     — Windows 10 Workstation"
+  echo "    5) dc02-ca   — Windows Server 2022 (DC-02 + AD CS)"
+  echo "    6) siem      — SIEM Stack (Elastic + Wazuh + Kibana)"
+  echo "    a) All (recommended order)"
   echo ""
   read -rp "  Choice [a]: " choice
   choice="${choice:-a}"
 }
 
-# ── Main ─────────────────────────────────────────────────────
-main() {
-  check_prereqs
-  collect_credentials
+# ── Main ────────────────────────────────────────────────────
+if [[ "$BUILD_ALL" == "1" ]]; then
+  for key in kali debian12 win2022 win10 dc02-ca siem; do
+    build_template "$key" || warn "Continuing after: $key"
+  done
+  print_vmids
+  exit 0
+fi
 
-  if [[ "$BUILD_ALL" == "1" ]]; then
-    for t in kali debian12 win2022 win10; do
-      build_template "$t" || warn "Continuing after failed template: $t"
+if [[ -n "$TEMPLATE" ]]; then
+  build_template "$TEMPLATE"
+  print_vmids
+  exit 0
+fi
+
+show_menu
+case "${choice,,}" in
+  1|kali)    build_template kali ;;
+  2|debian12) build_template debian12 ;;
+  3|win2022)  build_template win2022 ;;
+  4|win10)    build_template win10 ;;
+  5|dc02-ca)  build_template dc02-ca ;;
+  6|siem)     build_template siem ;;
+  a|*)
+    for key in kali debian12 win2022 win10 dc02-ca siem; do
+      build_template "$key" || warn "Continuing..."
     done
-    print_summary
-    return
-  fi
+    ;;
+esac
 
-  if [[ -n "$TEMPLATE" ]]; then
-    build_template "$TEMPLATE"
-    return
-  fi
-
-  show_menu
-  case "${choice,,}" in
-    1|kali)    build_template kali ;;
-    2|debian12) build_template debian12 ;;
-    3|win2022)  build_template win2022 ;;
-    4|win10)    build_template win10 ;;
-    a|*)
-      for t in kali debian12 win2022 win10; do
-        build_template "$t" || warn "Continuing after: $t"
-      done
-      print_summary
-      ;;
-  esac
-}
-
-print_summary() {
-  echo ""
-  printf '%b  ────────────────────────────────────────────────%b\n' "$GREEN" "$RESET"
-  printf '%b  All templates built!%b\n' "$GREEN" "$RESET"
-  printf '%b  ────────────────────────────────────────────────%b\n' "$GREEN" "$RESET"
-  echo ""
-  echo "  Next step: update TEMPLATES dict in"
-  echo "  /opt/coco/repo/web/backend/services/session_manager.py"
-  echo "  with the VMID numbers shown above."
-  echo ""
-  echo "  Find VMIDs in Proxmox GUI or:"
-  echo "  qm list | grep coco-tpl"
-  echo ""
-}
-
-main "$@"
+print_vmids

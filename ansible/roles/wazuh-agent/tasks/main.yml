@@ -1,0 +1,26 @@
+---
+- name: Install Wazuh agent (Linux)
+  when: ansible_connection != 'winrm'
+  ansible.builtin.shell: |
+    curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor -o /usr/share/keyrings/wazuh.gpg
+    echo 'deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main' > /etc/apt/sources.list.d/wazuh.list
+    apt-get update -qq
+    WAZUH_MANAGER="{{ siem_ip }}" apt-get install -y -qq wazuh-agent
+    systemctl enable --now wazuh-agent
+  args:
+    executable: /bin/bash
+
+- name: Install Wazuh agent (Windows)
+  when: ansible_connection == 'winrm'
+  block:
+    - ansible.windows.win_get_url:
+        url: "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.7.3-1.msi"
+        dest: "C:\\wazuh-agent.msi"
+    - ansible.windows.win_package:
+        path: "C:\\wazuh-agent.msi"
+        arguments: "/q WAZUH_MANAGER={{ siem_ip }} WAZUH_REGISTRATION_SERVER={{ siem_ip }}"
+        state: present
+    - ansible.windows.win_service:
+        name: WazuhSvc
+        start_mode: auto
+        state: started

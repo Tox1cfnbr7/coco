@@ -1,0 +1,8 @@
+---
+- name: Download and install Sysmon with SwiftOnSecurity config
+  ansible.windows.win_shell: |
+    Invoke-WebRequest -Uri "https://download.sysinternals.com/files/Sysmon.zip" -OutFile "C:\\Sysmon.zip" -UseBasicParsing
+    Expand-Archive -Path "C:\\Sysmon.zip" -DestinationPath "C:\\Sysmon" -Force
+    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/master/sysmonconfig-export.xml" -OutFile "C:\\Sysmon\\config.xml" -UseBasicParsing
+    C:\\Sysmon\\Sysmon64.exe -accepteula -i C:\\Sysmon\\config.xml
+  ignore_errors: true

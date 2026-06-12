@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.9.1
+#   Installer v0.9.2
 #   Target:  Debian 13 (Trixie) + Proxmox VE 9
 #   Stack:   FastAPI + React + PostgreSQL + Redis + Guacamole
 #   Repo:    https://github.com/Tox1cfnbr7/coco
@@ -12,8 +12,8 @@ IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Versioning ─────────────────────────────────────────────
-COCO_INSTALLER_VERSION="0.9.1"
-COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.1}"
+COCO_INSTALLER_VERSION="0.9.2"
+COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.2}"
 COCO_REPO_URL="${COCO_REPO_URL:-https://github.com/Tox1cfnbr7/coco.git}"
 COCO_REPO_BRANCH="${COCO_REPO_BRANCH:-main}"
 COCO_INSTALLER_RAW_URL="${COCO_INSTALLER_RAW_URL:-https://raw.githubusercontent.com/Tox1cfnbr7/coco/main/scripts/install.sh}"
@@ -88,9 +88,10 @@ divider()      { printf '  %b─────────────────
 
 ensure_runtime_dirs() {
   mkdir -p "$COCO_DIR" "$COCO_SSL_DIR" "$LOG_DIR" "$STATE_DIR" "$STEP_DIR"
-  chmod 700 "$STATE_DIR" "$STEP_DIR" 2>/dev/null || true
+  chmod 0755 "$COCO_DIR" "$COCO_SSL_DIR" "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
+  chmod 0700 "$STEP_DIR" 2>/dev/null || true
   touch "$LOG_FILE"
-  chmod 600 "$LOG_FILE" 2>/dev/null || true
+  chmod 0600 "$LOG_FILE" 2>/dev/null || true
 }
 
 print_log_tail() {
@@ -260,6 +261,8 @@ backup_file() {
 }
 
 shell_config_write() {
+  local old_umask
+  old_umask="$(umask)"
   umask 077
   {
     printf 'COCO_IP=%q\n'             "$COCO_IP"
@@ -273,6 +276,7 @@ shell_config_write() {
     printf 'COCO_REPO_BRANCH=%q\n'    "$COCO_REPO_BRANCH"
   } > "$COCO_CONFIG_FILE"
   chmod 600 "$COCO_CONFIG_FILE"
+  umask "$old_umask"
 }
 
 load_install_config() {
@@ -331,8 +335,9 @@ frontend_dir() {
 }
 
 write_version_file() {
-  local commit="unknown"
+  local commit="unknown" old_umask
   [[ -d "$COCO_REPO_DIR/.git" ]] && commit="$(git -C "$COCO_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  old_umask="$(umask)"
   umask 077
   cat > "$COCO_VERSION_FILE" <<EOF
 COCO_INSTALLER_VERSION=${COCO_INSTALLER_VERSION}
@@ -343,6 +348,7 @@ COCO_REPO_COMMIT=${commit}
 INSTALLED_AT=$(date -Is)
 EOF
   chmod 600 "$COCO_VERSION_FILE"
+  umask "$old_umask"
 }
 
 # ── Logo ───────────────────────────────────────────────────
@@ -454,6 +460,8 @@ collect_config() {
 # ── Step implementations ───────────────────────────────────
 
 step_bootstrap() {
+  repair_apt_keyring_permissions
+  run_cmd_allow_fail "Finishing interrupted package configuration" dpkg --configure -a
   run_cmd "Updating package index" apt-get update -qq
   run_cmd "Installing bootstrap tools" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     curl wget git vim unzip jq openssl ca-certificates gnupg lsb-release \
@@ -811,8 +819,9 @@ step_postgres() {
   db_pass="$(env_get COCO_DB_PASSWORD || true)"
   [[ -z "$db_pass" ]] && db_pass="$(openssl rand -hex 24)"
 
-  local sql
-  sql="${STATE_DIR}/coco-postgres.sql"
+  local sql old_umask
+  sql="$(mktemp /tmp/coco-postgres.XXXXXX.sql)"
+  old_umask="$(umask)"
   umask 077
   cat > "$sql" <<EOF
 DO \$\$
@@ -829,6 +838,7 @@ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'coco')\gexec
 ALTER DATABASE coco OWNER TO coco;
 GRANT ALL PRIVILEGES ON DATABASE coco TO coco;
 EOF
+  umask "$old_umask"
   chown postgres:postgres "$sql"
   chmod 600 "$sql"
   run_cmd "Configuring COCO database" runuser -u postgres -- psql -v ON_ERROR_STOP=1 -f "$sql"
@@ -855,6 +865,38 @@ download_with_fallback() {
     warn "Primary download failed — trying fallback"
     run_cmd "Downloading fallback" curl -fsSL "$fallback" -o "$dest"
   fi
+}
+
+
+ensure_guacd_service() {
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
+  if systemctl list-unit-files 2>/dev/null | grep -q '^guacd\.service'; then
+    run_cmd "Enabling guacd" systemctl enable --now guacd
+    return 0
+  fi
+
+  if [[ -x /usr/local/sbin/guacd ]]; then
+    cat > /etc/systemd/system/guacd.service <<'EOF'
+[Unit]
+Description=Apache Guacamole proxy daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/guacd -f
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    run_cmd "Reloading systemd for guacd" systemctl daemon-reload
+    run_cmd "Enabling guacd" systemctl enable --now guacd
+    return 0
+  fi
+
+  fail "guacd binary was not installed"
 }
 
 step_guacamole() {
@@ -936,7 +978,7 @@ EOF
   getent group "$tgrp" >/dev/null 2>&1 || tgrp="root"
   chown root:"$tgrp" /etc/guacamole/user-mapping.xml
 
-  run_cmd "Enabling guacd" systemctl enable --now guacd
+  ensure_guacd_service
   run_cmd "Enabling Tomcat 10" systemctl enable --now tomcat10
 
   env_set GUACAMOLE_URL  "http://localhost:8080/guacamole"
@@ -1149,6 +1191,18 @@ DONE
 
 
 heal_state_markers() {
+  if is_done bootstrap && ! command -v curl >/dev/null 2>&1; then
+    warn "Removing stale bootstrap marker — tools missing"
+    rm -f "${STEP_DIR}/bootstrap.done"
+  fi
+  if is_done proxmox && ! command -v pveversion >/dev/null 2>&1; then
+    warn "Removing stale proxmox marker — pveversion missing"
+    rm -f "${STEP_DIR}/proxmox.done"
+  fi
+  if is_done kernel_reboot && [[ "$(uname -r)" != *pve* ]]; then
+    warn "Removing stale kernel_reboot marker — Proxmox kernel not active"
+    rm -f "${STEP_DIR}/kernel_reboot.done"
+  fi
   if is_done coco && [[ ! -d "$COCO_REPO_DIR/.git" ]]; then
     warn "Removing stale coco marker — repository missing"
     rm -f "${STEP_DIR}/coco.done"

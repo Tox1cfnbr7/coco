@@ -23,27 +23,27 @@ api.interceptors.response.use(
 )
 
 export const authApi = {
-  login: (email, password) => api.post('/auth/login', { email, password }),
-  register: (data) => api.post('/auth/register', data),
-  me: () => api.get('/auth/me'),
-  generateInvite: (team_type) => api.post(`/auth/invite/generate?team_type=${team_type}`),
+  login:          (email, password) => api.post('/auth/login', { email, password }),
+  register:       (data)            => api.post('/auth/register', data),
+  me:             ()                => api.get('/auth/me'),
+  generateInvite: (team_type)       => api.post(`/auth/invite/generate?team_type=${team_type}`),
 }
 
 export const gamesApi = {
-  list: () => api.get('/games/'),
-  get: (id) => api.get(`/games/${id}`),
-  create: (data) => api.post('/games/', data),
-  start: (id) => api.post(`/games/${id}/start`),
-  join: (id, code) => api.post(`/games/${id}/join?join_code=${code}`),
-  submitFlag: (id, flag) => api.post(`/games/${id}/flag`, { flag }),
-  surrender: (id) => api.post(`/games/${id}/surrender`),
+  list:        ()           => api.get('/games/'),
+  get:         (id)         => api.get(`/games/${id}`),
+  create:      (data)       => api.post('/games/', data),
+  start:       (id)         => api.post(`/games/${id}/start`),
+  join:        (id, code)   => api.post(`/games/${id}/join?join_code=${code}`),
+  submitFlag:  (id, flag)   => api.post(`/games/${id}/flag`, { flag }),
+  surrender:   (id)         => api.post(`/games/${id}/surrender`),
 }
 
 export const adminApi = {
-  users: () => api.get('/admin/users'),
-  stats: () => api.get('/admin/stats'),
+  users:      () => api.get('/admin/users'),
+  stats:      () => api.get('/admin/stats'),
   toggleUser: (id) => api.patch(`/admin/users/${id}/toggle`),
-  audit: () => api.get('/admin/audit'),
+  audit:      () => api.get('/admin/audit'),
 }
 
 export default api

@@ -1,183 +1,192 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Terminal, Flag, Clock, Play, LogIn } from 'lucide-react'
+import { Terminal, Server, Flag } from 'lucide-react'
 import { gamesApi } from '../../lib/api'
 import useAuthStore from '../../store/auth'
 import Layout from '../../components/layout/Layout'
+
+function useTimer(startedAt, duration) {
+  const [remaining, setRemaining] = useState(null)
+  useEffect(() => {
+    if (!startedAt || duration === 'unlimited') return
+    const limits = { quick: 7200, standard: 28800 }
+    const limit = limits[duration] || 0
+    const tick = () => {
+      const elapsed = (Date.now() - new Date(startedAt).getTime()) / 1000
+      const left = Math.max(0, limit - elapsed)
+      setRemaining(left)
+    }
+    tick()
+    const t = setInterval(tick, 1000)
+    return () => clearInterval(t)
+  }, [startedAt, duration])
+  if (remaining === null) return null
+  const h = String(Math.floor(remaining / 3600)).padStart(2, '0')
+  const m = String(Math.floor((remaining % 3600) / 60)).padStart(2, '0')
+  const s = String(Math.floor(remaining % 60)).padStart(2, '0')
+  return `${h}:${m}:${s}`
+}
 
 export default function GameDetail() {
   const { id } = useParams()
   const { user } = useAuthStore()
   const navigate = useNavigate()
-  const [game, setGame] = useState(null)
-  const [flag, setFlag] = useState('')
-  const [flagError, setFlagError] = useState('')
+  const [game, setGame]       = useState(null)
+  const [flag, setFlag]       = useState('')
+  const [flagErr, setFlagErr] = useState('')
   const [captured, setCaptured] = useState(false)
   const [joinCode, setJoinCode] = useState('')
-  const [joinError, setJoinError] = useState('')
+  const [joinErr, setJoinErr]   = useState('')
 
   const load = () => gamesApi.get(id).then(r => setGame(r.data)).catch(() => {})
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t) }, [id])
 
-  useEffect(() => {
-    load()
-    const t = setInterval(load, 5000)
-    return () => clearInterval(t)
-  }, [id])
+  const timer = useTimer(game?.started_at, game?.duration)
 
-  const handleFlag = async (e) => {
+  const submitFlag = async (e) => {
     e.preventDefault()
-    setFlagError('')
+    setFlagErr('')
     try {
       await gamesApi.submitFlag(id, flag)
       setCaptured(true)
     } catch (err) {
-      setFlagError(err.response?.data?.detail || 'Wrong flag')
+      setFlagErr(err.response?.data?.detail || 'Wrong flag')
     }
   }
 
-  const handleJoin = async (e) => {
+  const joinTeam = async (e) => {
     e.preventDefault()
-    setJoinError('')
+    setJoinErr('')
     try {
       await gamesApi.join(id, joinCode)
       load()
     } catch (err) {
-      setJoinError(err.response?.data?.detail || 'Invalid code')
+      setJoinErr(err.response?.data?.detail || 'Invalid code')
     }
-  }
-
-  const handleStart = async () => {
-    await gamesApi.start(id)
-    load()
   }
 
   if (captured || game?.flag_captured) {
     return (
       <div style={{
-        minHeight: '100vh', background: '#1a0000',
+        minHeight: '100vh', background: '#0a0000',
         display: 'flex', flexDirection: 'column',
         alignItems: 'center', justifyContent: 'center',
-        color: '#ff3333',
+        color: '#cc0000',
       }}>
-        <div style={{ fontSize: 120, marginBottom: 24 }}>☠</div>
-        <div style={{ fontSize: 48, fontWeight: 700, letterSpacing: 4, marginBottom: 16 }}>
-          YOU GOT HACKED
-        </div>
-        <div style={{ fontSize: 18, color: '#cc0000', marginBottom: 40 }}>
+        <div style={{ fontSize: 96, lineHeight: 1, marginBottom: 24, filter: 'grayscale(0.3)' }}>☠</div>
+        <div style={{ fontSize: 36, fontWeight: 700, letterSpacing: 6, marginBottom: 12 }}>YOU GOT HACKED</div>
+        <div style={{ fontSize: 14, color: '#880000', marginBottom: 40, letterSpacing: 1 }}>
           Red Team captured the flag
         </div>
-        <button onClick={() => navigate('/dashboard')} style={{
-          background: 'transparent', border: '1px solid #ff3333',
-          color: '#ff3333', padding: '10px 28px',
-          borderRadius: 8, fontSize: 14, cursor: 'pointer',
-        }}>
+        <button onClick={() => navigate('/dashboard')} className="btn"
+          style={{ color: '#cc0000', borderColor: '#cc0000', fontSize: 12 }}>
           Back to dashboard
         </button>
       </div>
     )
   }
 
-  if (!game) return (
-    <Layout>
-      <div style={{ padding: 28, color: 'var(--text2)' }}>Loading...</div>
-    </Layout>
+  if (!game) return <Layout title="Loading..."><div style={{ padding: 24, color: 'var(--text3)' }}>Loading...</div></Layout>
+
+  const redTeam  = game.teams?.find(t => t.type === 'red')
+  const blueTeam = game.teams?.find(t => t.type === 'blue')
+
+  const action = (
+    <div style={{ display: 'flex', gap: 8 }}>
+      {user?.role === 'admin' && game.status === 'waiting' && (
+        <button className="btn" style={{ color: 'var(--green)', borderColor: 'var(--green)' }}
+          onClick={() => gamesApi.start(id).then(load)}>
+          Start game
+        </button>
+      )}
+      <button className="btn" onClick={() => navigate('/terminal')}>
+        <Terminal size={13} /> Terminal
+      </button>
+      <button className="btn" onClick={() => navigate('/vms')}>
+        <Server size={13} /> VMs
+      </button>
+      {game.duration === 'unlimited' && game.status === 'running' && (
+        <button className="btn" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}
+          onClick={() => gamesApi.surrender(id).then(load)}>
+          Surrender
+        </button>
+      )}
+    </div>
   )
 
   return (
-    <Layout>
-      <div style={{ padding: 28 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
-          <div>
-            <h1 style={{ fontSize: 20, fontWeight: 500 }}>{game.name}</h1>
-            <div style={{ fontSize: 13, color: 'var(--text2)', marginTop: 4 }}>
-              {game.mode?.replace('_', ' ')} · {game.duration}
+    <Layout title={game.name} action={action}>
+      <div style={{ padding: 24 }}>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1, background: 'var(--border)', border: '1px solid var(--border)', marginBottom: 24 }}>
+          {[
+            { l: 'Mode',     v: game.mode?.replace('_', ' ') },
+            { l: 'Duration', v: game.duration },
+            { l: 'Status',   v: <span className={`tag tag-${game.status === 'running' ? 'run' : game.status === 'waiting' ? 'wait' : 'end'}`}>{game.status}</span> },
+            { l: 'Network',  v: <span className="mono">{game.network_cidr || '—'}</span> },
+            { l: 'Timer',    v: timer ? <span className="mono">{timer}</span> : '—' },
+            { l: 'Started',  v: game.started_at ? new Date(game.started_at).toLocaleString() : '—' },
+          ].map(({ l, v }) => (
+            <div key={l} style={{ background: 'var(--bg)', padding: '12px 16px' }}>
+              <div style={{ fontSize: 10, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{l}</div>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>{v}</div>
             </div>
-          </div>
-          <div style={{ display: 'flex', gap: 10 }}>
-            {user?.role === 'admin' && game.status === 'waiting' && (
-              <button onClick={handleStart} style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                background: 'var(--green)', color: '#fff',
-                border: 'none', padding: '8px 16px',
-                borderRadius: 'var(--radius)', fontSize: 13,
-              }}>
-                <Play size={14} /> Start game
-              </button>
-            )}
-            <button onClick={() => navigate(`/games/${id}/terminal`)} style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              background: 'var(--bg2)', color: 'var(--text)',
-              border: '0.5px solid var(--border)', padding: '8px 16px',
-              borderRadius: 'var(--radius)', fontSize: 13,
-            }}>
-              <Terminal size={14} /> Open terminal
-            </button>
-          </div>
+          ))}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
-          {game.teams?.map(t => (
-            <div key={t.id} style={{
-              background: 'var(--bg2)', border: `0.5px solid ${t.type === 'red' ? 'var(--red)' : 'var(--blue)'}`,
-              borderRadius: 'var(--radius-lg)', padding: '16px 18px',
-            }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 24 }}>
+          {[redTeam, blueTeam].filter(Boolean).map(t => (
+            <div key={t.id}>
               <div style={{
-                display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10,
+                fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8,
                 color: t.type === 'red' ? 'var(--red)' : 'var(--blue)',
-                fontWeight: 500,
+                borderBottom: `2px solid ${t.type === 'red' ? 'var(--red)' : 'var(--blue)'}`,
+                paddingBottom: 8, marginBottom: 10,
+                display: 'flex', justifyContent: 'space-between',
               }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: t.type === 'red' ? 'var(--red)' : 'var(--blue)' }} />
-                {t.type === 'red' ? 'Red Team' : 'Blue Team'}
-                <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text2)' }}>
-                  {t.member_count} players
-                </span>
+                <span>{t.type === 'red' ? 'Red Team' : 'Blue Team'}</span>
+                <span style={{ fontWeight: 400, opacity: 0.7 }}>{t.member_count} players</span>
               </div>
-              {t.join_code && (
-                <div style={{ fontSize: 12, color: 'var(--text2)' }}>
-                  Join code: <span style={{ color: 'var(--text)', fontFamily: 'monospace' }}>{t.join_code}</span>
+              {user?.role === 'admin' && t.join_code && (
+                <div style={{ fontSize: 11, color: 'var(--text2)', marginBottom: 8 }}>
+                  Join code: <span className="mono" style={{ color: 'var(--text)' }}>{t.join_code}</span>
                 </div>
               )}
+              {t.members?.map(m => (
+                <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
+                  <span style={{ fontWeight: 500 }}>{m.username}</span>
+                  <span style={{ color: 'var(--text3)' }}>{m.team_type}</span>
+                </div>
+              ))}
             </div>
           ))}
         </div>
 
         {!user?.team_id && (
-          <div style={{
-            background: 'var(--bg2)', border: '0.5px solid var(--border)',
-            borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: 20,
-          }}>
-            <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
-              <LogIn size={16} /> Join a team
-            </h3>
-            <form onSubmit={handleJoin} style={{ display: 'flex', gap: 10 }}>
+          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 20, marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 }}>Join a team</div>
+            <form onSubmit={joinTeam} style={{ display: 'flex', gap: 8 }}>
               <input value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())}
-                placeholder="Enter join code" style={{ flex: 1 }} />
-              <button type="submit" style={{
-                background: 'var(--purple)', color: '#fff', border: 'none',
-                padding: '8px 18px', borderRadius: 'var(--radius)', fontSize: 13, whiteSpace: 'nowrap',
-              }}>Join</button>
+                placeholder="Enter join code" style={{ maxWidth: 200, borderBottom: '1px solid var(--border2)', padding: '7px 0' }} />
+              <button type="submit" className="btn btn-solid" style={{ fontSize: 12 }}>Join</button>
             </form>
-            {joinError && <div style={{ color: 'var(--red)', fontSize: 13, marginTop: 8 }}>{joinError}</div>}
+            {joinErr && <div style={{ fontSize: 12, color: 'var(--red)', marginTop: 8 }}>{joinErr}</div>}
           </div>
         )}
 
         {user?.team_type === 'red' && game.status === 'running' && (
-          <div style={{
-            background: 'rgba(226,75,74,0.05)', border: '0.5px solid var(--red)',
-            borderRadius: 'var(--radius-lg)', padding: '20px',
-          }}>
-            <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 14, color: 'var(--red)', display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Flag size={16} /> Submit flag
-            </h3>
-            <form onSubmit={handleFlag} style={{ display: 'flex', gap: 10 }}>
+          <div style={{ borderTop: '1px solid var(--red)', paddingTop: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5, color: 'var(--red)', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Flag size={13} /> Submit flag
+            </div>
+            <form onSubmit={submitFlag} style={{ display: 'flex', gap: 8 }}>
               <input value={flag} onChange={e => setFlag(e.target.value)}
-                placeholder="COCO{...}" style={{ flex: 1, fontFamily: 'monospace' }} />
-              <button type="submit" style={{
-                background: 'var(--red)', color: '#fff', border: 'none',
-                padding: '8px 18px', borderRadius: 'var(--radius)', fontSize: 13, whiteSpace: 'nowrap',
-              }}>Submit</button>
+                placeholder="COCO{...}"
+                className="mono"
+                style={{ maxWidth: 300, borderBottom: '1px solid var(--border2)', padding: '7px 0', fontSize: 12 }} />
+              <button type="submit" className="btn btn-danger" style={{ fontSize: 12 }}>Submit</button>
             </form>
-            {flagError && <div style={{ color: 'var(--red)', fontSize: 13, marginTop: 8 }}>{flagError}</div>}
+            {flagErr && <div style={{ fontSize: 12, color: 'var(--red)', marginTop: 8 }}>{flagErr}</div>}
           </div>
         )}
       </div>

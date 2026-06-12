@@ -5,15 +5,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      '/api': {
-        target: 'https://localhost:443',
-        changeOrigin: true,
-        secure: false,
-      },
+      '/api': { target: 'https://localhost:443', changeOrigin: true, secure: false },
     },
   },
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true,
-  },
+  build: { outDir: 'dist', emptyOutDir: true },
 })

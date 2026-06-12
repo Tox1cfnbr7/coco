@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-const useAuthStore = create((set) => ({
+const useAuthStore = create((set, get) => ({
   user: null,
   token: localStorage.getItem('coco_token') || null,
 
@@ -14,7 +14,7 @@ const useAuthStore = create((set) => ({
     set({ user: null, token: null })
   },
 
-  isAuthenticated: () => !!localStorage.getItem('coco_token'),
+  isAuthenticated: () => !!get().token,
 }))
 
 export default useAuthStore

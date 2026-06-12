@@ -1,102 +1,133 @@
 import { NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Sword, Users, Flag, Server, Settings, User, LogOut, Sun, Moon } from 'lucide-react'
-import useAuthStore from '../../store/auth'
 import { useState, useEffect } from 'react'
+import {
+  LayoutDashboard, Sword, Target, Terminal,
+  Server, Settings, LogOut, Sun, Moon,
+} from 'lucide-react'
+import useAuthStore from '../../store/auth'
+import Logo from '../../assets/Logo'
 
 const nav = [
+  { section: 'Overview' },
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/games', icon: Sword, label: 'Games' },
-  { to: '/teams', icon: Users, label: 'Teams' },
-  { to: '/flags', icon: Flag, label: 'Flags' },
-  { to: '/vms', icon: Server, label: 'VMs' },
+  { to: '/games',     icon: Sword,           label: 'Games' },
+  { section: 'Session' },
+  { to: '/terminal',  icon: Terminal,         label: 'Terminal' },
+  { to: '/vms',       icon: Server,           label: 'VMs' },
 ]
 
-export default function Layout({ children }) {
+const navAdmin = [
+  { section: 'Admin' },
+  { to: '/admin',  icon: Settings, label: 'Settings' },
+]
+
+const S = {
+  shell:   { display: 'flex', height: '100vh', overflow: 'hidden' },
+  sidebar: {
+    width: 200, flexShrink: 0,
+    background: 'var(--bg)', borderRight: '1px solid var(--border)',
+    display: 'flex', flexDirection: 'column',
+  },
+  logoWrap: {
+    padding: '20px 18px 16px',
+    borderBottom: '1px solid var(--border)',
+    display: 'flex', alignItems: 'center', gap: 10,
+  },
+  logoText: { fontSize: 14, fontWeight: 700, letterSpacing: 4 },
+  logoSub:  { fontSize: 9, letterSpacing: 1.5, color: 'var(--text3)', marginTop: 2 },
+  nav:      { flex: 1, padding: '12px 0', overflowY: 'auto' },
+  section:  { padding: '10px 18px 4px', fontSize: 10, color: 'var(--text3)', letterSpacing: 1, textTransform: 'uppercase' },
+  navItem:  (active) => ({
+    display: 'flex', alignItems: 'center', gap: 9,
+    padding: '7px 18px', fontSize: 12,
+    color: active ? 'var(--text)' : 'var(--text2)',
+    fontWeight: active ? 500 : 400,
+    cursor: 'pointer', textDecoration: 'none',
+    transition: 'color 0.1s',
+    borderLeft: `2px solid ${active ? 'var(--text)' : 'transparent'}`,
+  }),
+  bottom:   { padding: '14px 18px', borderTop: '1px solid var(--border)' },
+  userName: { fontSize: 12, fontWeight: 500 },
+  userRole: (t) => ({ fontSize: 11, color: t === 'red' ? 'var(--red)' : 'var(--blue)', marginTop: 2 }),
+  themeBtn: {
+    marginTop: 12, background: 'none', border: 'none',
+    color: 'var(--text3)', cursor: 'pointer', fontSize: 11,
+    padding: 0, display: 'flex', alignItems: 'center', gap: 6,
+  },
+  main:    { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+  topbar:  {
+    height: 48, borderBottom: '1px solid var(--border)',
+    display: 'flex', alignItems: 'center',
+    justifyContent: 'space-between', padding: '0 24px', flexShrink: 0,
+  },
+  topTitle: { fontSize: 13, fontWeight: 500 },
+  topRight: { display: 'flex', alignItems: 'center', gap: 8 },
+  content:  { flex: 1, overflowY: 'auto' },
+}
+
+export default function Layout({ children, title, action }) {
   const { user, logout } = useAuthStore()
   const navigate = useNavigate()
-  const [theme, setTheme] = useState(localStorage.getItem('coco_theme') || 'dark')
+  const [dark, setDark] = useState(
+    () => localStorage.getItem('coco_theme') !== 'light'
+  )
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme)
-    localStorage.setItem('coco_theme', theme)
-  }, [theme])
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
+    localStorage.setItem('coco_theme', dark ? 'dark' : 'light')
+  }, [dark])
 
-  const handleLogout = () => {
-    logout()
-    navigate('/login')
-  }
+  const allNav = user?.role === 'admin' ? [...nav, ...navAdmin] : nav
 
   return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
-      <aside style={{
-        width: 200, background: 'var(--bg2)',
-        borderRight: '0.5px solid var(--border)',
-        display: 'flex', flexDirection: 'column',
-        flexShrink: 0,
-      }}>
-        <div style={{ padding: '20px 16px 16px', borderBottom: '0.5px solid var(--border)' }}>
-          <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--purple)', letterSpacing: 2 }}>COCO</div>
-          <div style={{ fontSize: 10, color: 'var(--text3)', letterSpacing: 1, marginTop: 2 }}>ATTACK & DEFENSE</div>
+    <div style={S.shell}>
+      <aside style={S.sidebar}>
+        <div style={S.logoWrap}>
+          <Logo size={30} />
+          <div>
+            <div style={S.logoText}>COCO</div>
+            <div style={S.logoSub}>ATTACK & DEFENSE</div>
+          </div>
         </div>
 
-        <nav style={{ flex: 1, padding: '12px 0' }}>
-          {nav.map(({ to, icon: Icon, label }) => (
-            <NavLink key={to} to={to} style={({ isActive }) => ({
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '9px 16px', color: isActive ? 'var(--purple)' : 'var(--text2)',
-              background: isActive ? 'rgba(127,119,221,0.1)' : 'transparent',
-              borderLeft: isActive ? '2px solid var(--purple)' : '2px solid transparent',
-              textDecoration: 'none', fontSize: 13, transition: 'all 0.15s',
-            })}>
-              <Icon size={16} />
-              {label}
-            </NavLink>
-          ))}
-          {user?.role === 'admin' && (
-            <NavLink to="/admin" style={({ isActive }) => ({
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '9px 16px', color: isActive ? 'var(--purple)' : 'var(--text2)',
-              background: isActive ? 'rgba(127,119,221,0.1)' : 'transparent',
-              borderLeft: isActive ? '2px solid var(--purple)' : '2px solid transparent',
-              textDecoration: 'none', fontSize: 13,
-            })}>
-              <Settings size={16} />
-              Admin
-            </NavLink>
+        <nav style={S.nav}>
+          {allNav.map((item, i) =>
+            item.section ? (
+              <div key={i} style={S.section}>{item.section}</div>
+            ) : (
+              <NavLink key={item.to} to={item.to} style={({ isActive }) => S.navItem(isActive)}>
+                <item.icon size={14} />
+                {item.label}
+              </NavLink>
+            )
           )}
         </nav>
 
-        <div style={{ padding: '12px 0', borderTop: '0.5px solid var(--border)' }}>
-          <button onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '9px 16px', width: '100%', background: 'none',
-              border: 'none', color: 'var(--text2)', fontSize: 13,
-            }}>
-            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-            {theme === 'dark' ? 'Light mode' : 'Dark mode'}
-          </button>
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 10,
-            padding: '9px 16px', color: 'var(--text2)', fontSize: 13,
-          }}>
-            <User size={16} />
-            {user?.username || '—'}
+        <div style={S.bottom}>
+          <div style={S.userName}>{user?.username || '—'}</div>
+          <div style={S.userRole(user?.team_type)}>
+            {user?.team_type === 'red' ? 'Red Team' : user?.team_type === 'blue' ? 'Blue Team' : 'Admin'}
           </div>
-          <button onClick={handleLogout} style={{
-            display: 'flex', alignItems: 'center', gap: 10,
-            padding: '9px 16px', width: '100%', background: 'none',
-            border: 'none', color: 'var(--text2)', fontSize: 13,
-          }}>
-            <LogOut size={16} />
-            Logout
+          <button style={S.themeBtn} onClick={() => setDark(d => !d)}>
+            {dark ? <Sun size={13} /> : <Moon size={13} />}
+            {dark ? 'Light mode' : 'Dark mode'}
+          </button>
+          <button
+            style={{ ...S.themeBtn, marginTop: 8, color: 'var(--text3)' }}
+            onClick={() => { logout(); navigate('/login') }}
+          >
+            <LogOut size={13} /> Sign out
           </button>
         </div>
       </aside>
 
-      <main style={{ flex: 1, overflow: 'auto', background: 'var(--bg)' }}>
-        {children}
-      </main>
+      <div style={S.main}>
+        <div style={S.topbar}>
+          <span style={S.topTitle}>{title}</span>
+          <div style={S.topRight}>{action}</div>
+        </div>
+        <div style={S.content}>{children}</div>
+      </div>
     </div>
   )
 }

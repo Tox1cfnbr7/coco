@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.9.5
+#   Installer v0.9.3
 #   Target:  Debian 13 (Trixie) + Proxmox VE 9
 #   Stack:   FastAPI + React + PostgreSQL + Redis + Guacamole
 #   Repo:    https://github.com/Tox1cfnbr7/coco
@@ -12,8 +12,8 @@ IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Versioning ─────────────────────────────────────────────
-COCO_INSTALLER_VERSION="0.9.5"
-COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.5}"
+COCO_INSTALLER_VERSION="0.9.6"
+COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.6}"
 COCO_REPO_URL="${COCO_REPO_URL:-https://github.com/Tox1cfnbr7/coco.git}"
 COCO_REPO_BRANCH="${COCO_REPO_BRANCH:-main}"
 COCO_INSTALLER_RAW_URL="${COCO_INSTALLER_RAW_URL:-https://raw.githubusercontent.com/Tox1cfnbr7/coco/main/scripts/install.sh}"
@@ -1090,9 +1090,18 @@ EOF
   success "Guacamole accessible at http://localhost:8080/guacamole"
 }
 
+first_line() {
+  local s="${1:-}"
+  printf '%s' "${s%%$'\n'*}"
+}
+
 step_ansible() {
   run_cmd "Installing Ansible" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ansible ansible-core
-  command -v ansible >/dev/null 2>&1 && success "$(ansible --version | head -n1)"
+  if command -v ansible >/dev/null 2>&1; then
+    local ansible_version
+    ansible_version="$(ansible --version 2>/dev/null || true)"
+    success "$(first_line "${ansible_version:-ansible installed}")"
+  fi
 }
 
 step_packer() {
@@ -1106,7 +1115,9 @@ step_packer() {
   run_cmd "Installing Packer" unzip -o -q "$zip" -d /usr/local/bin/
   rm -f "$zip"
   chmod +x /usr/local/bin/packer
-  success "Packer: $(packer --version | head -n1)"
+  local packer_version
+  packer_version="$(packer --version 2>/dev/null || true)"
+  success "Packer: $(first_line "${packer_version:-installed}")"
 }
 
 step_node() {
@@ -1130,24 +1141,182 @@ step_ssl() {
   chmod 600 "${COCO_SSL_DIR}/coco.key"
 }
 
+repair_frontend_compat() {
+  local frontend src_dir api_file pkg_file
+  frontend="$(frontend_dir)"
+  src_dir="${frontend}/src"
+  api_file="${src_dir}/lib/api.js"
+  pkg_file="${frontend}/package.json"
+
+  [[ -d "$frontend" ]] || return 0
+  mkdir -p "${src_dir}/lib"
+
+  # Some repo snapshots reference ../lib/api from pages but do not contain the file.
+  # Create a conservative API client that matches the backend routes used by the UI.
+  if [[ ! -f "$api_file" ]]; then
+    cat > "$api_file" <<'APIEOF'
+import axios from 'axios'
+
+const api = axios.create({
+  baseURL: '/api',
+  headers: { 'Content-Type': 'application/json' },
+})
+
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('coco_token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err.response?.status === 401) {
+      localStorage.removeItem('coco_token')
+      window.location.href = '/login'
+    }
+    return Promise.reject(err)
+  }
+)
+
+export const authApi = {
+  login: (email, password) => api.post('/auth/login', { email, password }),
+  register: (data) => api.post('/auth/register', data),
+  me: () => api.get('/auth/me'),
+  generateInvite: (team_type) => api.post(`/auth/invite/generate?team_type=${team_type}`),
+}
+
+export const gamesApi = {
+  list: () => api.get('/games/'),
+  get: (id) => api.get(`/games/${id}`),
+  create: (data) => api.post('/games/', data),
+  start: (id) => api.post(`/games/${id}/start`),
+  join: (id, code) => api.post(`/games/${id}/join?join_code=${code}`),
+  submitFlag: (id, flag) => api.post(`/games/${id}/flag`, { flag }),
+  surrender: (id) => api.post(`/games/${id}/surrender`),
+}
+
+export const adminApi = {
+  users: () => api.get('/admin/users'),
+  stats: () => api.get('/admin/stats'),
+  toggleUser: (id) => api.patch(`/admin/users/${id}/toggle`),
+  audit: () => api.get('/admin/audit'),
+}
+
+export default api
+APIEOF
+    success "Created missing frontend API helper: $api_file"
+  fi
+
+  # Support older snapshots that import ../../lib/api from src/pages/*.
+  mkdir -p "${frontend}/lib"
+  cp -f "$api_file" "${frontend}/lib/api.js"
+
+  if [[ -f "$pkg_file" ]]; then
+    python3 - "$pkg_file" "$COCO_APP_VERSION" <<'PYPKG' || warn "Could not normalize frontend package.json"
+from pathlib import Path
+import json, sys
+p = Path(sys.argv[1]); version = sys.argv[2]
+data = json.loads(p.read_text(encoding='utf-8'))
+data['version'] = version
+data.setdefault('scripts', {})
+data['scripts'].setdefault('build', 'vite build')
+data.setdefault('dependencies', {})
+for name, spec in {
+    '@vitejs/plugin-react': '^4.3.1',
+    'vite': '^5.4.0',
+    'react': '^18.2.0',
+    'react-dom': '^18.2.0',
+    'react-router-dom': '^6.26.0',
+    'axios': '^1.7.7',
+    'zustand': '^4.5.5',
+    'lucide-react': '^0.468.0',
+}.items():
+    if name.startswith('@vitejs/'):
+        data.setdefault('devDependencies', {})
+        data['devDependencies'].setdefault(name, spec)
+    else:
+        data['dependencies'].setdefault(name, spec)
+p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PYPKG
+  fi
+}
+
+write_fallback_frontend_dist() {
+  local frontend dist
+  frontend="$(frontend_dir)"
+  dist="${frontend}/dist"
+  mkdir -p "$dist"
+  cat > "${dist}/index.html" <<EOF
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>COCO</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #09090b; color: #fafafa; }
+    main { max-width: 820px; margin: 8vh auto; padding: 32px; border: 1px solid #27272a; border-radius: 16px; background: #111113; }
+    code { background: #18181b; padding: 2px 6px; border-radius: 6px; }
+    a { color: #67e8f9; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>COCO Backend installed</h1>
+    <p>The React frontend source did not build successfully during installation, so this fallback page was generated to keep the service deployable.</p>
+    <p>Backend health endpoint: <a href="/api/health">/api/health</a></p>
+    <p>Check frontend build logs with: <code>tail -n 120 ${LOG_FILE}</code></p>
+  </main>
+</body>
+</html>
+EOF
+  success "Fallback frontend dist generated at $dist"
+}
+
 step_frontend() {
-  local frontend
+  local frontend build_rc
   frontend="$(frontend_dir)"
   if [[ ! -d "$frontend" ]]; then
-    warn "Frontend source not found at $frontend — skipping"
+    warn "Frontend source not found at $frontend — generating fallback dist"
+    mkdir -p "$frontend"
+    write_fallback_frontend_dist
     return 0
   fi
+
+  repair_frontend_compat
+
   pushd "$frontend" >/dev/null
   if [[ -f package-lock.json ]]; then
-    run_cmd "Installing frontend dependencies (npm ci)" npm ci --silent
+    run_cmd "Installing frontend dependencies (npm install)" npm install --silent
   else
     run_cmd "Installing frontend dependencies (npm install)" npm install --silent
   fi
-  run_cmd "Building React/Vite frontend" npm run build
-  popd >/dev/null
-  success "Frontend built at ${frontend}/dist"
-}
 
+  info "Building React/Vite frontend"
+  set +e
+  npm run build >> "$LOG_FILE" 2>&1
+  build_rc=$?
+  set -e
+  if [[ $build_rc -ne 0 ]]; then
+    warn "React frontend build failed; applying compatibility repair and retrying once"
+    popd >/dev/null
+    repair_frontend_compat
+    pushd "$frontend" >/dev/null
+    set +e
+    npm run build >> "$LOG_FILE" 2>&1
+    build_rc=$?
+    set -e
+  fi
+  popd >/dev/null
+
+  if [[ $build_rc -ne 0 ]]; then
+    warn "React frontend build still failed; generating fallback dist so installation can continue"
+    write_fallback_frontend_dist
+  else
+    success "Frontend built at ${frontend}/dist"
+  fi
+}
 step_dbinit() {
   local backend
   backend="$(backend_dir)"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.9.0
+#   Installer v0.9.1
 #   Target:  Debian 13 (Trixie) + Proxmox VE 9
 #   Stack:   FastAPI + React + PostgreSQL + Redis + Guacamole
 #   Repo:    https://github.com/Tox1cfnbr7/coco
@@ -12,8 +12,8 @@ IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Versioning ─────────────────────────────────────────────
-COCO_INSTALLER_VERSION="0.9.0"
-COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.0}"
+COCO_INSTALLER_VERSION="0.9.1"
+COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.1}"
 COCO_REPO_URL="${COCO_REPO_URL:-https://github.com/Tox1cfnbr7/coco.git}"
 COCO_REPO_BRANCH="${COCO_REPO_BRANCH:-main}"
 COCO_INSTALLER_RAW_URL="${COCO_INSTALLER_RAW_URL:-https://raw.githubusercontent.com/Tox1cfnbr7/coco/main/scripts/install.sh}"
@@ -181,6 +181,22 @@ is_systemd_available() {
   command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system || -d /etc/systemd/system ]]
 }
 
+repair_apt_keyring_permissions() {
+  # apt on Debian 13 verifies repositories as the _apt user. Existing keyrings
+  # from failed previous runs must be world-readable, otherwise apt-get update
+  # only emits warnings and later package operations become unreliable.
+  local f
+  for f in \
+    /usr/share/keyrings/proxmox-archive-keyring.gpg \
+    /usr/share/keyrings/proxmox-release-trixie.gpg \
+    /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg; do
+    if [[ -f "$f" ]]; then
+      chown root:root "$f" 2>/dev/null || true
+      chmod 0644 "$f" 2>/dev/null || true
+    fi
+  done
+}
+
 # ── State management ───────────────────────────────────────
 step_number() {
   local key="$1" i=1 s
@@ -236,7 +252,11 @@ with_step() {
 # ── Config helpers ─────────────────────────────────────────
 backup_file() {
   local f="$1"
-  [[ -f "$f" && ! -f "${f}.coco.bak" ]] && cp -a "$f" "${f}.coco.bak" && log_line "BACKUP" "$f"
+  if [[ -f "$f" && ! -f "${f}.coco.bak" ]]; then
+    cp -a "$f" "${f}.coco.bak"
+    log_line "BACKUP" "$f"
+  fi
+  return 0
 }
 
 shell_config_write() {
@@ -481,6 +501,8 @@ EOF
   else
     success "Proxmox GPG keyring downloaded"
   fi
+  chown root:root "$key_dest"
+  chmod 0644 "$key_dest"
 
   cat > /etc/apt/sources.list.d/proxmox.sources <<'EOF'
 Types: deb
@@ -578,8 +600,8 @@ step_kernel_reboot() {
   echo ""
 
   if [[ "$NO_REBOOT" == "1" ]]; then
-    warn "--no-reboot set. Reboot manually then run: bash ${COCO_DIR}/install.sh --resume"
-    return 0
+    warn "--no-reboot set. Reboot manually, then run: bash ${COCO_DIR}/install.sh --resume"
+    exit 0
   fi
 
   mark_done "kernel_reboot"
@@ -1184,6 +1206,7 @@ run_all() {
 main() {
   parse_args "$@"
   ensure_runtime_dirs
+  repair_apt_keyring_permissions
   print_logo
   require_root
 

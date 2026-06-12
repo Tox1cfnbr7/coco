@@ -1,0 +1,8 @@
+---
+- name: "[VULN] mssql_xp_cmdshell — Enable xp_cmdshell"
+  ansible.windows.win_shell: |
+    sqlcmd -S localhost -U SA -P "{{ mssql_sa_password }}" -Q "
+    EXEC sp_configure 'show advanced options', 1; RECONFIGURE;
+    EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;"
+  when: "'dc-mssql' in vm_role"
+  ignore_errors: true

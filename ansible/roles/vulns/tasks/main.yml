@@ -1,0 +1,63 @@
+---
+# roles/vulns/tasks/main.yml
+# Dispatches to individual vuln task files based on active_vulns list.
+
+- name: Include webserver_sqli
+  ansible.builtin.include_tasks: webserver_sqli.yml
+  when: "'webserver_sqli' in active_vulns"
+
+- name: Include webserver_rce_upload
+  ansible.builtin.include_tasks: webserver_rce_upload.yml
+  when: "'webserver_rce_upload' in active_vulns"
+
+- name: Include webserver_lfi
+  ansible.builtin.include_tasks: webserver_lfi.yml
+  when: "'webserver_lfi' in active_vulns"
+
+- name: Include smb_anonymous_read
+  ansible.builtin.include_tasks: smb_anonymous_read.yml
+  when: "'smb_anonymous_read' in active_vulns"
+
+- name: Include ad_kerberoastable_svc
+  ansible.builtin.include_tasks: ad_kerberoastable_svc.yml
+  when: "'ad_kerberoastable_svc' in active_vulns"
+
+- name: Include ad_asrep_roasting
+  ansible.builtin.include_tasks: ad_asrep_roasting.yml
+  when: "'ad_asrep_roasting' in active_vulns"
+
+- name: Include ad_password_spray
+  ansible.builtin.include_tasks: ad_password_spray.yml
+  when: "'ad_password_spray' in active_vulns"
+
+- name: Include mssql_xp_cmdshell
+  ansible.builtin.include_tasks: mssql_xp_cmdshell.yml
+  when: "'mssql_xp_cmdshell' in active_vulns"
+
+- name: Include smb_signing_disabled
+  ansible.builtin.include_tasks: smb_signing_disabled.yml
+  when: "'smb_signing_disabled' in active_vulns"
+
+- name: Include win_unquoted_service
+  ansible.builtin.include_tasks: win_unquoted_service.yml
+  when: "'win_unquoted_service' in active_vulns"
+
+- name: Include win_weak_gpo
+  ansible.builtin.include_tasks: win_weak_gpo.yml
+  when: "'win_weak_gpo' in active_vulns"
+
+- name: Include linux_suid_bash
+  ansible.builtin.include_tasks: linux_suid_bash.yml
+  when: "'linux_suid_bash' in active_vulns"
+
+- name: Include linux_sudo_nopasswd
+  ansible.builtin.include_tasks: linux_sudo_nopasswd.yml
+  when: "'linux_sudo_nopasswd' in active_vulns"
+
+- name: Include mssql_sa_weak_password
+  ansible.builtin.include_tasks: mssql_sa_weak_password.yml
+  when: "'mssql_sa_weak_password' in active_vulns"
+
+- name: Include ad_krbtgt_old
+  ansible.builtin.include_tasks: ad_krbtgt_old.yml
+  when: "'ad_krbtgt_old' in active_vulns"

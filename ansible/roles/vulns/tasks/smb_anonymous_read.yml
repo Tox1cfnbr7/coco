@@ -1,0 +1,21 @@
+---
+- name: "[VULN] smb_anonymous_read — Allow anonymous SMB"
+  community.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+    name: RestrictNullSessAccess
+    data: 0
+    type: dword
+  when: "'win' in vm_role"
+  ignore_errors: true
+
+- name: "[VULN] smb_anonymous_read — Linux Samba anonymous"
+  ansible.builtin.blockinfile:
+    path: /etc/samba/smb.conf
+    block: |
+      [public]
+         path = /srv/samba/public
+         browseable = yes
+         guest ok = yes
+         read only = yes
+  when: "'linux' in vm_role"
+  ignore_errors: true

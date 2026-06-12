@@ -1,0 +1,9 @@
+---
+- name: "[VULN] ad_kerberoastable_svc — Create service account with SPN (RC4)"
+  ansible.windows.win_shell: |
+    $pw = ConvertTo-SecureString "Service123!" -AsPlainText -Force
+    New-ADUser -Name "svc_backup" -AccountPassword $pw -Enabled $true `
+      -PasswordNeverExpires $true -Description "Backup Service Account"
+    Set-ADUser svc_backup -Add @{ServicePrincipalName="MSSQLSvc/dc02.corp.coco.local:1433"}
+  when: "'dc-primary' in vm_role"
+  ignore_errors: true

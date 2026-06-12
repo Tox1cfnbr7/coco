@@ -1,0 +1,38 @@
+---
+# COCO — teardown-session.yml
+# Called when admin kills a session. Cleans up any persistent state on VMs
+# before Proxmox deletes them (optional — Proxmox delete is the real cleanup).
+
+- name: Graceful shutdown (best effort)
+  hosts: all
+  gather_facts: false
+  ignore_unreachable: true
+  ignore_errors: true
+  tasks:
+    - name: Linux — clear coco flag files
+      ansible.builtin.find:
+        paths: /root
+        patterns: "COCO{*"
+      register: flag_files
+      when: ansible_connection != 'winrm'
+
+    - name: Linux — remove flag files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ flag_files.files | default([]) }}"
+      when: ansible_connection != 'winrm'
+
+    - name: Windows — clear flag files
+      ansible.windows.win_find:
+        paths: C:\Users\Administrator
+        patterns: "COCO{*"
+      register: win_flag_files
+      when: ansible_connection == 'winrm'
+
+    - name: Windows — remove flag files
+      ansible.windows.win_file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ win_flag_files.files | default([]) }}"
+      when: ansible_connection == 'winrm'

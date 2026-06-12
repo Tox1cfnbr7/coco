@@ -39,11 +39,25 @@ export const gamesApi = {
   surrender:   (id)         => api.post(`/games/${id}/surrender`),
 }
 
+export const sessionsApi = {
+  list:        ()              => api.get('/sessions/'),
+  get:         (id)            => api.get(`/sessions/${id}`),
+  create:      (data)          => api.post('/sessions/', data),
+  start:       (id)            => api.post(`/sessions/${id}/start`),
+  kill:        (id)            => api.post(`/sessions/${id}/kill`),
+  join:        (id, code)      => api.post(`/sessions/${id}/join?join_code=${code}`),
+  submitFlag:  (id, flag)      => api.post(`/sessions/${id}/flag`, { flag }),
+  milestone:   (id, milestone) => api.post(`/sessions/${id}/milestone`, { milestone }),
+  scoreboard:  (id)            => api.get(`/sessions/${id}/scoreboard`),
+  vms:         (id)            => api.get(`/sessions/${id}/vms`),
+  events:      (id)            => api.get(`/sessions/${id}/events`),
+}
+
 export const adminApi = {
-  users:      () => api.get('/admin/users'),
-  stats:      () => api.get('/admin/stats'),
-  toggleUser: (id) => api.patch(`/admin/users/${id}/toggle`),
-  audit:      () => api.get('/admin/audit'),
+  users:      ()     => api.get('/admin/users'),
+  stats:      ()     => api.get('/admin/stats'),
+  toggleUser: (id)   => api.patch(`/admin/users/${id}/toggle`),
+  audit:      ()     => api.get('/admin/audit'),
 }
 
 export default api

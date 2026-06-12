@@ -1,0 +1,74 @@
+---
+# COCO — deploy-session.yml
+# Called by SessionManager after VMs are cloned and booted.
+# Variables passed via --extra-vars @vuln-vars.json:
+#   coco_game_id, coco_mode, coco_active_vulns (list), coco_flags (list)
+
+- name: Wait for all VMs to be reachable
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH/WinRM connection
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        sleep: 10
+
+- name: Configure Domain Controller (Primary)
+  hosts: dc-primary
+  gather_facts: true
+  roles:
+    - common
+    - dc-primary
+  vars:
+    domain_name: corp.coco.local
+    domain_netbios: CORP
+    admin_password: "Coco2024!"
+
+- name: Configure MSSQL Server
+  hosts: dc-mssql
+  gather_facts: true
+  roles:
+    - common
+    - dc-mssql
+  vars:
+    domain_name: corp.coco.local
+    mssql_sa_password: "Coco2024!"
+
+- name: Configure Web Server
+  hosts: web
+  gather_facts: true
+  roles:
+    - common
+    - webserver
+
+- name: Configure Linux Services
+  hosts: linux
+  gather_facts: true
+  roles:
+    - common
+    - linux-vuln
+
+- name: Configure Workstation
+  hosts: workstation
+  gather_facts: true
+  roles:
+    - common
+
+- name: Inject Vulnerabilities
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Run vuln injection per host
+      ansible.builtin.include_role:
+        name: vulns
+      vars:
+        active_vulns: "{{ coco_active_vulns }}"
+
+- name: Place flags on services
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Place flag files
+      ansible.builtin.include_tasks: roles/common/tasks/place_flags.yml
+      vars:
+        game_flags: "{{ coco_flags }}"

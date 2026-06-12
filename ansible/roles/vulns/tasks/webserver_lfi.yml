@@ -1,0 +1,8 @@
+---
+- name: "[VULN] webserver_lfi — Enable page parameter without sanitization"
+  ansible.builtin.lineinfile:
+    path: /var/www/html/index.php
+    insertafter: "<?php"
+    line: "if(isset($_GET['page'])) { include($_GET['page']); } // VULN: LFI"
+  when: "'web' in vm_role"
+  ignore_errors: true

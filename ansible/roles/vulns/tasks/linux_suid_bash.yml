@@ -1,0 +1,7 @@
+---
+- name: "[VULN] linux_suid_bash — Set SUID on bash"
+  ansible.builtin.file:
+    path: /bin/bash
+    mode: "u+s"
+  when: "'linux' in vm_role"
+  ignore_errors: true

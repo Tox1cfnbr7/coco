@@ -1,0 +1,15 @@
+---
+- name: "[VULN] webserver_rce_upload — Allow PHP upload"
+  ansible.builtin.lineinfile:
+    path: /var/www/html/upload.php
+    regexp: ".*check_extension.*"
+    line: "// VULN: no extension check"
+  when: "'web' in vm_role"
+  ignore_errors: true
+
+- name: "[VULN] webserver_rce_upload — Make uploads dir executable"
+  ansible.builtin.file:
+    path: /var/www/html/uploads
+    mode: "0777"
+  when: "'web' in vm_role"
+  ignore_errors: true

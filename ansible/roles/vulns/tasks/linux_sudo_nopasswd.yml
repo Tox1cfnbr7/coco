@@ -1,0 +1,17 @@
+---
+- name: "[VULN] linux_sudo_nopasswd — Add NOPASSWD sudo for a user"
+  ansible.builtin.user:
+    name: devops
+    password: "{{ 'devops123' | password_hash('sha512') }}"
+    shell: /bin/bash
+  when: "'linux' in vm_role"
+  ignore_errors: true
+
+- name: "[VULN] linux_sudo_nopasswd — Add sudoers entry"
+  ansible.builtin.lineinfile:
+    path: /etc/sudoers.d/devops
+    create: yes
+    line: "devops ALL=(ALL) NOPASSWD: /usr/bin/python3"
+    validate: visudo -cf %s
+  when: "'linux' in vm_role"
+  ignore_errors: true

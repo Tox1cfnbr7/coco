@@ -1,0 +1,9 @@
+---
+- name: "[VULN] win_unquoted_service — Create vulnerable service with unquoted path"
+  ansible.windows.win_shell: |
+    New-Item -ItemType Directory -Path "C:\Program Files\Vuln App\bin" -Force
+    Copy-Item C:\Windows\System32\notepad.exe "C:\Program Files\Vuln App\bin\service.exe"
+    sc.exe create VulnSvc binPath= "C:\Program Files\Vuln App\bin\service.exe" start= auto
+    sc.exe start VulnSvc
+  when: "'win' in vm_role"
+  ignore_errors: true

@@ -1,0 +1,5 @@
+---
+- name: "[VULN] ad_krbtgt_old — Note: krbtgt password not rotated (default state)"
+  ansible.builtin.debug:
+    msg: "krbtgt password intentionally left unrotated for Golden Ticket simulation"
+  when: "'dc-primary' in vm_role"

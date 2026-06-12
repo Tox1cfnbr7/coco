@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #   COCO - Attack & Defense Platform
-#   Installer v0.9.3
+#   Installer v0.9.0
 #   Target:  Debian 13 (Trixie) + Proxmox VE 9
 #   Stack:   FastAPI + React + PostgreSQL + Redis + Guacamole
 #   Repo:    https://github.com/Tox1cfnbr7/coco
@@ -12,8 +12,8 @@ IFS=$'\n\t'
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ── Versioning ─────────────────────────────────────────────
-COCO_INSTALLER_VERSION="0.9.7"
-COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.7}"
+COCO_INSTALLER_VERSION="0.9.8"
+COCO_APP_VERSION="${COCO_APP_VERSION:-0.9.8}"
 COCO_REPO_URL="${COCO_REPO_URL:-https://github.com/Tox1cfnbr7/coco.git}"
 COCO_REPO_BRANCH="${COCO_REPO_BRANCH:-main}"
 COCO_INSTALLER_RAW_URL="${COCO_INSTALLER_RAW_URL:-https://raw.githubusercontent.com/Tox1cfnbr7/coco/main/scripts/install.sh}"
@@ -39,10 +39,6 @@ COCO_RESUME_SERVICE="/etc/systemd/system/coco-install-resume.service"
 PACKER_VERSION="${PACKER_VERSION:-1.11.0}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 GUAC_VERSION="${GUAC_VERSION:-1.6.0}"
-# COCO mainly needs Guacamole for browser-based SSH/terminal access.
-# RDP build on Debian 13 currently fails with FreeRDP 3.x deprecation warnings
-# treated as errors in guacamole-server 1.6.0. Keep RDP disabled by default.
-COCO_GUAC_ENABLE_RDP="${COCO_GUAC_ENABLE_RDP:-0}"
 
 # ── Flags ──────────────────────────────────────────────────
 VERBOSE=0
@@ -92,10 +88,9 @@ divider()      { printf '  %b─────────────────
 
 ensure_runtime_dirs() {
   mkdir -p "$COCO_DIR" "$COCO_SSL_DIR" "$LOG_DIR" "$STATE_DIR" "$STEP_DIR"
-  chmod 0755 "$COCO_DIR" "$COCO_SSL_DIR" "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
-  chmod 0700 "$STEP_DIR" 2>/dev/null || true
+  chmod 700 "$STATE_DIR" "$STEP_DIR" 2>/dev/null || true
   touch "$LOG_FILE"
-  chmod 0600 "$LOG_FILE" 2>/dev/null || true
+  chmod 600 "$LOG_FILE" 2>/dev/null || true
 }
 
 print_log_tail() {
@@ -186,22 +181,6 @@ is_systemd_available() {
   command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system || -d /etc/systemd/system ]]
 }
 
-repair_apt_keyring_permissions() {
-  # apt on Debian 13 verifies repositories as the _apt user. Existing keyrings
-  # from failed previous runs must be world-readable, otherwise apt-get update
-  # only emits warnings and later package operations become unreliable.
-  local f
-  for f in \
-    /usr/share/keyrings/proxmox-archive-keyring.gpg \
-    /usr/share/keyrings/proxmox-release-trixie.gpg \
-    /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg; do
-    if [[ -f "$f" ]]; then
-      chown root:root "$f" 2>/dev/null || true
-      chmod 0644 "$f" 2>/dev/null || true
-    fi
-  done
-}
-
 # ── State management ───────────────────────────────────────
 step_number() {
   local key="$1" i=1 s
@@ -257,16 +236,10 @@ with_step() {
 # ── Config helpers ─────────────────────────────────────────
 backup_file() {
   local f="$1"
-  if [[ -f "$f" && ! -f "${f}.coco.bak" ]]; then
-    cp -a "$f" "${f}.coco.bak"
-    log_line "BACKUP" "$f"
-  fi
-  return 0
+  [[ -f "$f" && ! -f "${f}.coco.bak" ]] && cp -a "$f" "${f}.coco.bak" && log_line "BACKUP" "$f"
 }
 
 shell_config_write() {
-  local old_umask
-  old_umask="$(umask)"
   umask 077
   {
     printf 'COCO_IP=%q\n'             "$COCO_IP"
@@ -280,7 +253,6 @@ shell_config_write() {
     printf 'COCO_REPO_BRANCH=%q\n'    "$COCO_REPO_BRANCH"
   } > "$COCO_CONFIG_FILE"
   chmod 600 "$COCO_CONFIG_FILE"
-  umask "$old_umask"
 }
 
 load_install_config() {
@@ -339,9 +311,8 @@ frontend_dir() {
 }
 
 write_version_file() {
-  local commit="unknown" old_umask
+  local commit="unknown"
   [[ -d "$COCO_REPO_DIR/.git" ]] && commit="$(git -C "$COCO_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  old_umask="$(umask)"
   umask 077
   cat > "$COCO_VERSION_FILE" <<EOF
 COCO_INSTALLER_VERSION=${COCO_INSTALLER_VERSION}
@@ -352,7 +323,6 @@ COCO_REPO_COMMIT=${commit}
 INSTALLED_AT=$(date -Is)
 EOF
   chmod 600 "$COCO_VERSION_FILE"
-  umask "$old_umask"
 }
 
 # ── Logo ───────────────────────────────────────────────────
@@ -464,8 +434,6 @@ collect_config() {
 # ── Step implementations ───────────────────────────────────
 
 step_bootstrap() {
-  repair_apt_keyring_permissions
-  run_cmd_allow_fail "Finishing interrupted package configuration" dpkg --configure -a
   run_cmd "Updating package index" apt-get update -qq
   run_cmd "Installing bootstrap tools" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     curl wget git vim unzip jq openssl ca-certificates gnupg lsb-release \
@@ -513,8 +481,6 @@ EOF
   else
     success "Proxmox GPG keyring downloaded"
   fi
-  chown root:root "$key_dest"
-  chmod 0644 "$key_dest"
 
   cat > /etc/apt/sources.list.d/proxmox.sources <<'EOF'
 Types: deb
@@ -612,8 +578,8 @@ step_kernel_reboot() {
   echo ""
 
   if [[ "$NO_REBOOT" == "1" ]]; then
-    warn "--no-reboot set. Reboot manually, then run: bash ${COCO_DIR}/install.sh --resume"
-    exit 0
+    warn "--no-reboot set. Reboot manually then run: bash ${COCO_DIR}/install.sh --resume"
+    return 0
   fi
 
   mark_done "kernel_reboot"
@@ -739,6 +705,78 @@ PYPKG
 }
 
 
+
+patch_backend_config() {
+  local cfg auth_route main_py
+  cfg="$(backend_dir)/core/config.py"
+  auth_route="$(backend_dir)/routes/auth.py"
+  main_py="$(backend_dir)/main.py"
+
+  # config.py: extra=ignore + lockout_minutes
+  if [[ -f "$cfg" ]]; then
+    python3 - "$cfg" <<'PYCFG'
+from pathlib import Path
+import re, sys
+p = Path(sys.argv[1])
+s = p.read_text(encoding='utf-8', errors='replace')
+if 'extra = "ignore"' not in s and "extra=" not in s:
+    s = re.sub(r'(case_sensitive\s*=\s*False)', r'\1\n        extra = "ignore"', s)
+    print("config.py: extra=ignore added")
+if 'lockout_minutes' not in s:
+    s = s.rstrip() + '\n    lockout_minutes: int = 15\n    max_login_attempts: int = 5\n'
+    print("config.py: lockout_minutes added")
+p.write_text(s, encoding='utf-8')
+PYCFG
+  fi
+
+  # auth.py: EmailStr -> str
+  if [[ -f "$auth_route" ]]; then
+    python3 - "$auth_route" <<'PYAUTH'
+from pathlib import Path
+import re, sys
+p = Path(sys.argv[1])
+s = p.read_text(encoding='utf-8', errors='replace')
+s = re.sub(r',\s*EmailStr', '', s)
+s = re.sub(r'EmailStr,\s*', '', s)
+s = s.replace('email: EmailStr', 'email: str')
+print("auth.py: EmailStr replaced with str")
+p.write_text(s, encoding='utf-8')
+PYAUTH
+  fi
+
+  # main.py: SPA fallback
+  if [[ -f "$main_py" ]]; then
+    python3 - "$main_py" <<'PYMAIN'
+from pathlib import Path
+import re, sys
+p = Path(sys.argv[1])
+s = p.read_text(encoding='utf-8', errors='replace')
+old = 'frontend_dist = "/opt/coco/repo/web/frontend/dist"\nif os.path.exists(frontend_dist):\n    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")'
+new = '''from fastapi.responses import FileResponse
+frontend_dist = "/opt/coco/repo/web/frontend/dist"
+if os.path.exists(frontend_dist):
+    assets_dir = os.path.join(frontend_dist, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        index = os.path.join(frontend_dist, "index.html")
+        if os.path.exists(index):
+            return FileResponse(index)
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "Frontend not built"}, status_code=404)'''
+if old in s:
+    s = s.replace(old, new)
+    print("main.py: SPA fallback patched")
+elif "spa_fallback" not in s:
+    print("WARN: main.py pattern not found")
+else:
+    print("main.py: SPA fallback already present")
+p.write_text(s, encoding='utf-8')
+PYMAIN
+  fi
+}
+
 step_coco() {
   mkdir -p "$COCO_DIR" "$COCO_SSL_DIR" "${COCO_DIR}/logs"
 
@@ -778,6 +816,7 @@ EOF
   env_set COCO_BACKEND_DIR  "$backend"
   env_set COCO_FRONTEND_DIR "$frontend"
   repair_repo_compat
+  patch_backend_config
   write_version_file
   success "COCO repository ready at $COCO_REPO_DIR"
 }
@@ -823,9 +862,8 @@ step_postgres() {
   db_pass="$(env_get COCO_DB_PASSWORD || true)"
   [[ -z "$db_pass" ]] && db_pass="$(openssl rand -hex 24)"
 
-  local sql old_umask
-  sql="$(mktemp /tmp/coco-postgres.XXXXXX.sql)"
-  old_umask="$(umask)"
+  local sql
+  sql="${STATE_DIR}/coco-postgres.sql"
   umask 077
   cat > "$sql" <<EOF
 DO \$\$
@@ -842,7 +880,6 @@ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'coco')\gexec
 ALTER DATABASE coco OWNER TO coco;
 GRANT ALL PRIVILEGES ON DATABASE coco TO coco;
 EOF
-  umask "$old_umask"
   chown postgres:postgres "$sql"
   chmod 600 "$sql"
   run_cmd "Configuring COCO database" runuser -u postgres -- psql -v ON_ERROR_STOP=1 -f "$sql"
@@ -871,144 +908,27 @@ download_with_fallback() {
   fi
 }
 
-
-apt_package_available() {
-  local pkg="$1"
-  apt-cache show "$pkg" >/dev/null 2>&1
-}
-
-package_installed() {
-  local pkg="$1"
-  dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -qx 'install ok installed'
-}
-
-select_first_available_package() {
-  local pkg
-  for pkg in "$@"; do
-    if apt_package_available "$pkg"; then
-      printf '%s' "$pkg"
-      return 0
-    fi
-  done
-  return 1
-}
-
-add_available_package() {
-  local __array_name="$1"; shift
-  local pkg
-  pkg="$(select_first_available_package "$@" || true)"
-  if [[ -n "$pkg" ]]; then
-    eval "$__array_name+=("$pkg")"
-    return 0
-  fi
-  return 1
-}
-
-remove_installed_packages_if_present() {
-  local label="$1"; shift
-  local pkg remove_pkgs=()
-  for pkg in "$@"; do
-    if package_installed "$pkg"; then
-      remove_pkgs+=("$pkg")
-    fi
-  done
-
-  if [[ ${#remove_pkgs[@]} -eq 0 ]]; then
-    success "$label: no installed matching packages"
-    return 0
-  fi
-
-  run_cmd "$label" env DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq "${remove_pkgs[@]}"
-}
-
-
-ensure_guacd_service() {
-  systemctl daemon-reload >/dev/null 2>&1 || true
-
-  if systemctl list-unit-files 2>/dev/null | grep -q '^guacd\.service'; then
-    run_cmd "Enabling guacd" systemctl enable --now guacd
-    return 0
-  fi
-
-  if [[ -x /usr/local/sbin/guacd ]]; then
-    cat > /etc/systemd/system/guacd.service <<'EOF'
-[Unit]
-Description=Apache Guacamole proxy daemon
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/sbin/guacd -f
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    run_cmd "Reloading systemd for guacd" systemctl daemon-reload
-    run_cmd "Enabling guacd" systemctl enable --now guacd
-    return 0
-  fi
-
-  fail "guacd binary was not installed"
-}
-
 step_guacamole() {
-  # Build dependencies. Debian 13/Trixie removed freerdp2-dev; freerdp3-dev is
-  # the correct package there. The installer therefore resolves package names
-  # before apt-get install instead of trying a known-bad package first.
-  run_cmd "Updating package index before Guacamole dependencies" apt-get update -qq
-
-  local deps=()
-  local pkg missing=()
-  local required_deps=(
-    build-essential make gcc g++ pkg-config autoconf automake
-    libcairo2-dev libpng-dev libtool-bin uuid-dev
+  # Build dependencies
+  local common_deps=(
+    build-essential libcairo2-dev libpng-dev libtool-bin libossp-uuid-dev
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
     libpango1.0-dev libssh2-1-dev libtelnet-dev libvncserver-dev
     libwebsockets-dev libpulse-dev libssl-dev libvorbis-dev libwebp-dev
     tomcat10 tomcat10-admin wget curl
   )
-  local optional_deps=(
-    libossp-uuid-dev
-  )
-
-  for pkg in "${required_deps[@]}"; do
-    if apt_package_available "$pkg"; then
-      deps+=("$pkg")
-    else
-      missing+=("$pkg")
-    fi
-  done
-
-  if [[ ${#missing[@]} -gt 0 ]]; then
-    fail "Required Guacamole build packages not available in apt: ${missing[*]}"
-  fi
-
-  for pkg in "${optional_deps[@]}"; do
-    if apt_package_available "$pkg"; then
-      deps+=("$pkg")
-    else
-      warn "Optional Guacamole package not available: $pkg"
-    fi
-  done
-
-  add_available_package deps libjpeg62-turbo-dev libjpeg-dev \
-    || fail "No JPEG development package available (tried libjpeg62-turbo-dev, libjpeg-dev)"
-
-  if [[ "${COCO_GUAC_ENABLE_RDP}" == "1" ]]; then
-    if add_available_package deps freerdp2-dev freerdp3-dev; then
-      success "FreeRDP development package selected; RDP support requested"
-    else
-      warn "RDP support requested but no FreeRDP development package is available; building without RDP"
-      COCO_GUAC_ENABLE_RDP="0"
-    fi
+  set +e
+  env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    "${common_deps[@]}" libjpeg62-turbo-dev freerdp2-dev >> "$LOG_FILE" 2>&1
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    warn "freerdp2 not available — trying freerdp3"
+    run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive \
+      apt-get install -y -qq "${common_deps[@]}" libjpeg-dev freerdp3-dev
   else
-    warn "RDP support disabled by default to avoid Debian 13 / FreeRDP 3 build failures; SSH/VNC/Telnet remain enabled"
-    remove_installed_packages_if_present "Removing installed FreeRDP development packages while RDP support is disabled"       freerdp2-dev freerdp3-dev libfreerdp-dev libfreerdp2-dev libfreerdp3-dev
+    success "Guacamole build dependencies installed"
   fi
-
-  run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${deps[@]}"
 
   # Build guacd from source
   local tar_file="/tmp/guacamole-server-${GUAC_VERSION}.tar.gz"
@@ -1020,22 +940,7 @@ step_guacamole() {
   rm -rf "$src_dir"
   run_cmd "Extracting guacamole-server" tar -xzf "$tar_file" -C /tmp
   pushd "$src_dir" >/dev/null
-
-  local configure_args=(--with-init-dir=/etc/init.d)
-  if [[ "${COCO_GUAC_ENABLE_RDP}" != "1" ]]; then
-    if ./configure --help 2>/dev/null | grep -q -- '--disable-rdp'; then
-      configure_args+=(--disable-rdp)
-    else
-      warn "guacamole-server configure does not expose --disable-rdp; continuing without explicit RDP disable"
-    fi
-  else
-    # FreeRDP 3.x exposes deprecated APIs that guacamole-server 1.6.0 may treat
-    # as build errors. This macro hides those deprecated FreeRDP 3 declarations
-    # where supported. FreeRDP 2 ignores it.
-    export CPPFLAGS="${CPPFLAGS:-} -DWITHOUT_FREERDP_3x_DEPRECATED"
-  fi
-
-  run_cmd "Configuring guacd" ./configure "${configure_args[@]}"
+  run_cmd "Configuring guacd" ./configure --with-init-dir=/etc/init.d
   run_cmd "Building guacd (this takes a few minutes)" make -j"$(nproc)"
   run_cmd "Installing guacd" make install
   popd >/dev/null
@@ -1082,7 +987,7 @@ EOF
   getent group "$tgrp" >/dev/null 2>&1 || tgrp="root"
   chown root:"$tgrp" /etc/guacamole/user-mapping.xml
 
-  ensure_guacd_service
+  run_cmd "Enabling guacd" systemctl enable --now guacd
   run_cmd "Enabling Tomcat 10" systemctl enable --now tomcat10
 
   env_set GUACAMOLE_URL  "http://localhost:8080/guacamole"
@@ -1090,18 +995,9 @@ EOF
   success "Guacamole accessible at http://localhost:8080/guacamole"
 }
 
-first_line() {
-  local s="${1:-}"
-  printf '%s' "${s%%$'\n'*}"
-}
-
 step_ansible() {
   run_cmd "Installing Ansible" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ansible ansible-core
-  if command -v ansible >/dev/null 2>&1; then
-    local ansible_version
-    ansible_version="$(ansible --version 2>/dev/null || true)"
-    success "$(first_line "${ansible_version:-ansible installed}")"
-  fi
+  command -v ansible >/dev/null 2>&1 && success "$(ansible --version | head -n1)"
 }
 
 step_packer() {
@@ -1115,9 +1011,7 @@ step_packer() {
   run_cmd "Installing Packer" unzip -o -q "$zip" -d /usr/local/bin/
   rm -f "$zip"
   chmod +x /usr/local/bin/packer
-  local packer_version
-  packer_version="$(packer --version 2>/dev/null || true)"
-  success "Packer: $(first_line "${packer_version:-installed}")"
+  success "Packer: $(packer --version | head -n1)"
 }
 
 step_node() {
@@ -1141,206 +1035,118 @@ step_ssl() {
   chmod 600 "${COCO_SSL_DIR}/coco.key"
 }
 
-repair_frontend_compat() {
-  local frontend src_dir api_file pkg_file
+write_fallback_frontend_dist() {
+  local frontend dist
   frontend="$(frontend_dir)"
-  src_dir="${frontend}/src"
-  api_file="${src_dir}/lib/api.js"
-  pkg_file="${frontend}/package.json"
+  dist="${frontend}/dist"
+  mkdir -p "$dist"
+  cat > "${dist}/index.html" <<FBEOF
+<!doctype html><html lang="en"><head><meta charset="utf-8"/><title>COCO</title>
+<style>body{margin:0;font-family:system-ui,sans-serif;background:#09090b;color:#fafafa}
+main{max-width:820px;margin:8vh auto;padding:32px;border:1px solid #27272a;border-radius:16px;background:#111113}
+a{color:#67e8f9}</style></head><body><main>
+<h1>COCO Backend installed</h1>
+<p>Frontend build failed. Check: <code>tail -n 120 ${LOG_FILE}</code></p>
+<p>Backend health: <a href="/api/health">/api/health</a></p>
+</main></body></html>
+FBEOF
+  warn "Fallback frontend dist written"
+}
 
-  [[ -d "$frontend" ]] || return 0
-  mkdir -p "${src_dir}/lib"
+repair_frontend_missing_files() {
+  local frontend src lib store
+  frontend="$(frontend_dir)"
+  src="${frontend}/src"
+  lib="${src}/lib"
+  store="${src}/store"
+  mkdir -p "$lib" "$store" "${frontend}/lib" "${frontend}/store" \
+    "${frontend}/components/layout" "${frontend}/assets"
 
-  # Some repo snapshots reference ../lib/api from pages but do not contain the file.
-  # Create a conservative API client that matches the backend routes used by the UI.
-  if [[ ! -f "$api_file" ]]; then
-    cat > "$api_file" <<'APIEOF'
+  if [[ ! -f "${lib}/api.js" ]]; then
+    cat > "${lib}/api.js" <<'APIEOF'
 import axios from 'axios'
-
-const api = axios.create({
-  baseURL: '/api',
-  headers: { 'Content-Type': 'application/json' },
-})
-
+const api = axios.create({ baseURL: '/api', headers: { 'Content-Type': 'application/json' } })
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('coco_token')
   if (token) config.headers.Authorization = `Bearer ${token}`
   return config
 })
-
-api.interceptors.response.use(
-  (res) => res,
-  (err) => {
-    if (err.response?.status === 401) {
-      localStorage.removeItem('coco_token')
-      window.location.href = '/login'
-    }
-    return Promise.reject(err)
-  }
-)
-
+api.interceptors.response.use((res) => res, (err) => {
+  if (err.response?.status === 401) { localStorage.removeItem('coco_token'); window.location.href = '/login' }
+  return Promise.reject(err)
+})
 export const authApi = {
   login: (email, password) => api.post('/auth/login', { email, password }),
   register: (data) => api.post('/auth/register', data),
   me: () => api.get('/auth/me'),
   generateInvite: (team_type) => api.post(`/auth/invite/generate?team_type=${team_type}`),
 }
-
 export const gamesApi = {
-  list: () => api.get('/games/'),
-  get: (id) => api.get(`/games/${id}`),
-  create: (data) => api.post('/games/', data),
-  start: (id) => api.post(`/games/${id}/start`),
+  list: () => api.get('/games/'), get: (id) => api.get(`/games/${id}`),
+  create: (data) => api.post('/games/', data), start: (id) => api.post(`/games/${id}/start`),
   join: (id, code) => api.post(`/games/${id}/join?join_code=${code}`),
   submitFlag: (id, flag) => api.post(`/games/${id}/flag`, { flag }),
-  surrender: (id) => api.post(`/games/${id}/surrender`),
 }
-
+export const sessionsApi = {
+  list: () => api.get('/sessions/'), get: (id) => api.get(`/sessions/${id}`),
+  create: (data) => api.post('/sessions/', data), start: (id) => api.post(`/sessions/${id}/start`),
+  kill: (id) => api.post(`/sessions/${id}/kill`),
+  join: (id, code) => api.post(`/sessions/${id}/join?join_code=${code}`),
+  submitFlag: (id, flag) => api.post(`/sessions/${id}/flag`, { flag }),
+  milestone: (id, m) => api.post(`/sessions/${id}/milestone`, { milestone: m }),
+  scoreboard: (id) => api.get(`/sessions/${id}/scoreboard`),
+  vms: (id) => api.get(`/sessions/${id}/vms`),
+}
 export const adminApi = {
-  users: () => api.get('/admin/users'),
-  stats: () => api.get('/admin/stats'),
-  toggleUser: (id) => api.patch(`/admin/users/${id}/toggle`),
-  audit: () => api.get('/admin/audit'),
+  users: () => api.get('/admin/users'), toggleUser: (id) => api.patch(`/admin/users/${id}/toggle`),
+  stats: () => api.get('/admin/stats'), audit: () => api.get('/admin/audit'),
+  proxmoxStatus: () => api.get('/admin/proxmox/status'),
+  proxmoxStorage: () => api.get('/admin/proxmox/storage'),
+  proxmoxVms: () => api.get('/admin/proxmox/vms'),
+  vmAction: (vmid, action) => {
+    if (action === 'start')   return api.post(`/admin/proxmox/vms/${vmid}/start`)
+    if (action === 'stop')    return api.post(`/admin/proxmox/vms/${vmid}/stop`)
+    if (action === 'restart') return api.post(`/admin/proxmox/vms/${vmid}/restart`)
+    if (action === 'delete')  return api.delete(`/admin/proxmox/vms/${vmid}`)
+  },
+  templates: () => api.get('/admin/templates'),
+  buildTemplate: (key) => api.post(`/admin/templates/${key}/build`),
+  deleteTemplate: (vmid) => api.delete(`/admin/templates/${vmid}`),
+  adminSessions: () => api.get('/admin/sessions'),
+  health: () => api.get('/admin/health'),
+  generateInvite: (type) => api.post(`/auth/invite/generate?team_type=${type}`),
 }
-
 export default api
 APIEOF
-    success "Created missing frontend API helper: $api_file"
+    success "Created src/lib/api.js"
   fi
+  cp -f "${lib}/api.js" "${frontend}/lib/api.js"
 
-  # Support older snapshots that import ../../lib/api from src/pages/*.
-  mkdir -p "${frontend}/lib"
-  cp -f "$api_file" "${frontend}/lib/api.js"
-
-  # Some snapshots import ../../store/auth from src/pages/*, which resolves to
-  # <frontend>/store/auth.js. Others import ../store/auth, which resolves to
-  # <frontend>/src/store/auth.js. Create both shims so Vite can resolve either.
-  for auth_file in "${frontend}/store/auth.js" "${src_dir}/store/auth.js"; do
-    if [[ ! -f "$auth_file" ]]; then
-      mkdir -p "$(dirname "$auth_file")"
-      cat > "$auth_file" <<'AUTHEOF'
+  if [[ ! -f "${store}/auth.js" ]]; then
+    cat > "${store}/auth.js" <<'AUTHEOF'
 import { create } from 'zustand'
-import api, { authApi } from '../lib/api.js'
-
-const tokenKey = 'coco_token'
-
-export const useAuthStore = create((set, get) => ({
-  token: localStorage.getItem(tokenKey),
-  user: null,
-  isAuthenticated: !!localStorage.getItem(tokenKey),
-  loading: false,
-  error: null,
-
-  login: async (email, password) => {
-    set({ loading: true, error: null })
-    try {
-      const res = await authApi.login(email, password)
-      const data = res.data || {}
-      const token = data.access_token || data.token || data.accessToken
-      if (token) {
-        localStorage.setItem(tokenKey, token)
-        api.defaults.headers.common.Authorization = `Bearer ${token}`
-      }
-      set({ token, user: data.user || null, isAuthenticated: !!token, loading: false })
-      return data
-    } catch (err) {
-      const message = err.response?.data?.detail || err.message || 'Login failed'
-      set({ error: message, loading: false })
-      throw err
-    }
-  },
-
-  logout: () => {
-    localStorage.removeItem(tokenKey)
-    delete api.defaults.headers.common.Authorization
-    set({ token: null, user: null, isAuthenticated: false })
-  },
-
-  fetchMe: async () => {
-    try {
-      const res = await authApi.me()
-      set({ user: res.data || null, isAuthenticated: true })
-      return res.data
-    } catch (err) {
-      get().logout()
-      return null
-    }
-  },
-
-  setUser: (user) => set({ user }),
+const useAuthStore = create((set, get) => ({
+  user: null, token: localStorage.getItem('coco_token') || null,
+  setAuth: (user, token) => { localStorage.setItem('coco_token', token); set({ user, token }) },
+  logout: () => { localStorage.removeItem('coco_token'); set({ user: null, token: null }) },
+  isAuthenticated: () => !!get().token,
 }))
-
 export default useAuthStore
 AUTHEOF
-      success "Created missing frontend auth store shim: $auth_file"
-    fi
-  done
-
-  if [[ -f "$pkg_file" ]]; then
-    python3 - "$pkg_file" "$COCO_APP_VERSION" <<'PYPKG' || warn "Could not normalize frontend package.json"
-from pathlib import Path
-import json, sys
-p = Path(sys.argv[1]); version = sys.argv[2]
-data = json.loads(p.read_text(encoding='utf-8'))
-data['version'] = version
-data.setdefault('scripts', {})
-data['scripts'].setdefault('build', 'vite build')
-data.setdefault('dependencies', {})
-for name, spec in {
-    '@vitejs/plugin-react': '^4.3.1',
-    'vite': '^5.4.0',
-    'react': '^18.2.0',
-    'react-dom': '^18.2.0',
-    'react-router-dom': '^6.26.0',
-    'axios': '^1.7.7',
-    'zustand': '^4.5.5',
-    'lucide-react': '^0.468.0',
-}.items():
-    if name.startswith('@vitejs/'):
-        data.setdefault('devDependencies', {})
-        data['devDependencies'].setdefault(name, spec)
-    else:
-        data['dependencies'].setdefault(name, spec)
-p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-PYPKG
+    success "Created src/store/auth.js"
   fi
-}
+  cp -f "${store}/auth.js" "${frontend}/store/auth.js"
 
-write_fallback_frontend_dist() {
-  local frontend dist
-  frontend="$(frontend_dir)"
-  dist="${frontend}/dist"
-  mkdir -p "$dist"
-  cat > "${dist}/index.html" <<EOF
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>COCO</title>
-  <style>
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #09090b; color: #fafafa; }
-    main { max-width: 820px; margin: 8vh auto; padding: 32px; border: 1px solid #27272a; border-radius: 16px; background: #111113; }
-    code { background: #18181b; padding: 2px 6px; border-radius: 6px; }
-    a { color: #67e8f9; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>COCO Backend installed</h1>
-    <p>The React frontend source did not build successfully during installation, so this fallback page was generated to keep the service deployable.</p>
-    <p>Backend health endpoint: <a href="/api/health">/api/health</a></p>
-    <p>Check frontend build logs with: <code>tail -n 120 ${LOG_FILE}</code></p>
-  </main>
-</body>
-</html>
-EOF
-  success "Fallback frontend dist generated at $dist"
+  [[ -f "${src}/components/layout/Layout.jsx" ]] && \
+    cp -f "${src}/components/layout/Layout.jsx" "${frontend}/components/layout/Layout.jsx" || true
+  [[ -f "${src}/assets/Logo.jsx" ]] && \
+    cp -f "${src}/assets/Logo.jsx" "${frontend}/assets/Logo.jsx" || true
 }
 
 step_frontend() {
-  local frontend build_rc
+  local frontend build_rc=0
   frontend="$(frontend_dir)"
+
   if [[ ! -d "$frontend" ]]; then
     warn "Frontend source not found at $frontend — generating fallback dist"
     mkdir -p "$frontend"
@@ -1348,41 +1154,33 @@ step_frontend() {
     return 0
   fi
 
-  repair_frontend_compat
+  repair_frontend_missing_files
+  rm -rf "${frontend}/node_modules/.vite"
 
   pushd "$frontend" >/dev/null
-  if [[ -f package-lock.json ]]; then
-    run_cmd "Installing frontend dependencies (npm install)" npm install --silent
-  else
-    run_cmd "Installing frontend dependencies (npm install)" npm install --silent
-  fi
+  run_cmd "Installing frontend dependencies" npm install --silent
 
   info "Building React/Vite frontend"
-  if npm run build >> "$LOG_FILE" 2>&1; then
-    build_rc=0
-  else
-    build_rc=$?
-  fi
+  npm run build >> "$LOG_FILE" 2>&1 && build_rc=0 || build_rc=1
+
   if [[ $build_rc -ne 0 ]]; then
-    warn "React frontend build failed; applying compatibility repair and retrying once"
+    warn "First build failed — repairing and retrying"
     popd >/dev/null
-    repair_frontend_compat
+    repair_frontend_missing_files
     pushd "$frontend" >/dev/null
-    if npm run build >> "$LOG_FILE" 2>&1; then
-      build_rc=0
-    else
-      build_rc=$?
-    fi
+    npm run build >> "$LOG_FILE" 2>&1 && build_rc=0 || build_rc=1
   fi
   popd >/dev/null
 
   if [[ $build_rc -ne 0 ]]; then
-    warn "React frontend build still failed; generating fallback dist so installation can continue"
+    warn "Frontend build failed — generating fallback dist so install can continue"
+    print_log_tail
     write_fallback_frontend_dist
   else
     success "Frontend built at ${frontend}/dist"
   fi
 }
+
 step_dbinit() {
   local backend
   backend="$(backend_dir)"
@@ -1417,6 +1215,10 @@ step_admin() {
 import os, sys
 backend = os.environ.get('PYTHONPATH', '/opt/coco/repo/web/backend')
 sys.path.insert(0, backend)
+try:
+    import models.game
+except Exception as e:
+    print(f'WARN: models.game: {e}')
 from core.database import SessionLocal
 from core.security import hash_password
 from models.user import User, UserRole
@@ -1530,18 +1332,6 @@ DONE
 
 
 heal_state_markers() {
-  if is_done bootstrap && ! command -v curl >/dev/null 2>&1; then
-    warn "Removing stale bootstrap marker — tools missing"
-    rm -f "${STEP_DIR}/bootstrap.done"
-  fi
-  if is_done proxmox && ! command -v pveversion >/dev/null 2>&1; then
-    warn "Removing stale proxmox marker — pveversion missing"
-    rm -f "${STEP_DIR}/proxmox.done"
-  fi
-  if is_done kernel_reboot && [[ "$(uname -r)" != *pve* ]]; then
-    warn "Removing stale kernel_reboot marker — Proxmox kernel not active"
-    rm -f "${STEP_DIR}/kernel_reboot.done"
-  fi
   if is_done coco && [[ ! -d "$COCO_REPO_DIR/.git" ]]; then
     warn "Removing stale coco marker — repository missing"
     rm -f "${STEP_DIR}/coco.done"
@@ -1599,7 +1389,6 @@ run_all() {
 main() {
   parse_args "$@"
   ensure_runtime_dirs
-  repair_apt_keyring_permissions
   print_logo
   require_root
 

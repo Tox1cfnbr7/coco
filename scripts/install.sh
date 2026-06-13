@@ -236,7 +236,14 @@ with_step() {
 # ── Config helpers ─────────────────────────────────────────
 backup_file() {
   local f="$1"
-  [[ -f "$f" && ! -f "${f}.coco.bak" ]] && cp -a "$f" "${f}.coco.bak" && log_line "BACKUP" "$f"
+  # Use an explicit if-branch so this function NEVER returns non-zero.
+  # The old one-liner  [[ cond ]] && cp ...  returns 1 when cond is false
+  # (file already backed up on a resume), which triggers the ERR trap.
+  if [[ -f "$f" && ! -f "${f}.coco.bak" ]]; then
+    cp -a "$f" "${f}.coco.bak"
+    log_line "BACKUP" "$f"
+  fi
+  return 0
 }
 
 shell_config_write() {
@@ -480,6 +487,14 @@ EOF
       "$key_url_fallback" -O "$key_dest"
   else
     success "Proxmox GPG keyring downloaded"
+  fi
+  # apt runs as _apt (non-root); the keyring must be world-readable.
+  # The installer runs with umask 077, so wget creates the file 600 — fix it.
+  chmod 644 "$key_dest"
+  # Sanity check: readable by non-root?
+  if ! sudo -u nobody test -r "$key_dest" 2>/dev/null; then
+    warn "Keyring still not world-readable — forcing permissions"
+    chmod 644 "$key_dest"
   fi
 
   cat > /etc/apt/sources.list.d/proxmox.sources <<'EOF'
@@ -1400,6 +1415,21 @@ main() {
     heal_state_markers
     run_all
     return 0
+  fi
+
+  # If a previous run left a config, offer to resume from it rather than
+  # prompting the user for all credentials again.
+  if [[ -f "$COCO_CONFIG_FILE" ]]; then
+    printf '\n%b  [*] Existing config found at %s%b\n' "$YELLOW" "$COCO_CONFIG_FILE" "$RESET"
+    printf '%b  Continue with existing config? [Y/n]: %b' "$YELLOW" "$RESET"
+    local ans; read -r ans
+    if [[ "${ans,,}" != "n" ]]; then
+      load_install_config
+      heal_state_markers
+      run_all
+      return 0
+    fi
+    info "Starting fresh — existing config will be overwritten"
   fi
 
   check_os

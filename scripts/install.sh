@@ -877,10 +877,10 @@ step_postgres() {
   db_pass="$(env_get COCO_DB_PASSWORD || true)"
   [[ -z "$db_pass" ]] && db_pass="$(openssl rand -hex 24)"
 
+  # Build the SQL in a variable (never written to disk, so no file-permission
+  # issues when runuser -u postgres reads it).
   local sql
-  sql="${STATE_DIR}/coco-postgres.sql"
-  umask 077
-  cat > "$sql" <<EOF
+  sql="$(cat <<EOF
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'coco') THEN
@@ -895,10 +895,11 @@ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'coco')\gexec
 ALTER DATABASE coco OWNER TO coco;
 GRANT ALL PRIVILEGES ON DATABASE coco TO coco;
 EOF
-  chown postgres:postgres "$sql"
-  chmod 600 "$sql"
-  run_cmd "Configuring COCO database" runuser -u postgres -- psql -v ON_ERROR_STOP=1 -f "$sql"
-  rm -f "$sql"
+)"
+  # Feed SQL via stdin — no temp file, no directory-traversal permission needed.
+  run_cmd "Configuring COCO database" bash -c \
+    'printf "%s\n" "$1" | runuser -u postgres -- psql -v ON_ERROR_STOP=1' \
+    -- "$sql"
 
   env_set COCO_DB_PASSWORD "$db_pass"
   env_set DB_URL            "postgresql://coco:${db_pass}@localhost/coco"

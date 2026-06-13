@@ -1,3 +1,11 @@
+# ============================================================
+# EXPERIMENTAL — NOT used by the supported installer.
+# The supported deployment is the NATIVE installer: scripts/install.sh
+# (PostgreSQL, Redis, Guacamole and the FastAPI service are installed
+#  directly on the Debian 13 control VM). This compose file is kept only
+#  as a reference for a future containerised deployment and will not work
+#  as-is (the api/ and frontend/ build contexts are not included).
+# ============================================================
 version: "3.9"
 
 services:

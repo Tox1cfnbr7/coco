@@ -1,0 +1,41 @@
+---
+# roles/common/tasks/place_flags.yml
+# Drops each flag onto the VM it belongs to. A flag's `service` field equals
+# the inventory hostname of the target VM (see SessionManager._build_flags_config).
+# Red Team captures by reading the flag and submitting it in the web-GUI.
+
+- name: "[flags] Determine this host's flag"
+  ansible.builtin.set_fact:
+    _my_flag: "{{ (game_flags | default([]) | selectattr('service','equalto', inventory_hostname) | list | first) | default(None) }}"
+
+- name: "[flags] Linux — place flag on web root, /flag.txt and root home"
+  ansible.builtin.copy:
+    dest: "{{ item }}"
+    content: "{{ _my_flag.flag_value }}\n"
+    mode: "0644"
+  loop:
+    - /flag.txt
+    - /root/flag.txt
+    - /var/www/html/flag.txt
+  when:
+    - _my_flag is not none
+    - ansible_connection != 'winrm'
+  ignore_errors: true
+
+- name: "[flags] Windows — ensure Desktop exists"
+  ansible.windows.win_file:
+    path: C:\Users\Administrator\Desktop
+    state: directory
+  when:
+    - _my_flag is not none
+    - ansible_connection == 'winrm'
+  ignore_errors: true
+
+- name: "[flags] Windows — place flag on the Administrator Desktop (the document to protect)"
+  ansible.windows.win_copy:
+    dest: 'C:\Users\Administrator\Desktop\flag.txt'
+    content: "{{ _my_flag.flag_value }}\r\n"
+  when:
+    - _my_flag is not none
+    - ansible_connection == 'winrm'
+  ignore_errors: true

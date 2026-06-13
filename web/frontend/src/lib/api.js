@@ -30,17 +30,6 @@ export const authApi = {
   generateInvite: (team_type)       => api.post(`/auth/invite/generate?team_type=${team_type}`),
 }
 
-// ── Games (legacy) ─────────────────────────────
-export const gamesApi = {
-  list:       ()           => api.get('/games/'),
-  get:        (id)         => api.get(`/games/${id}`),
-  create:     (data)       => api.post('/games/', data),
-  start:      (id)         => api.post(`/games/${id}/start`),
-  join:       (id, code)   => api.post(`/games/${id}/join?join_code=${code}`),
-  submitFlag: (id, flag)   => api.post(`/games/${id}/flag`, { flag }),
-  surrender:  (id)         => api.post(`/games/${id}/surrender`),
-}
-
 // ── Sessions ───────────────────────────────────
 export const sessionsApi = {
   list:       ()              => api.get('/sessions/'),

@@ -19,7 +19,10 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
 
-from services.vm_config import TEMPLATES, GAME_VMS
+from services.vm_config import (
+    TEMPLATES, GAME_VMS, SERVICES_TO_CHECK, DEFAULT_CREDS,
+    is_windows,
+)
 from services.proxmox import get_proxmox
 from models.game import (
     Game, Team, VM, GameEvent, ServiceCheck, CapturedFlag,
@@ -29,70 +32,6 @@ from core.config import get_settings
 
 settings = get_settings()
 
-
-# ── VM Templates (set after Packer builds) ─────────────────
-# These VMID numbers must match what Packer creates on Proxmox
-TEMPLATES = {
-    "kali":         9000,   # Kali Linux 2024 — Red Team attacker
-    "win-dc":       9001,   # Windows Server 2022 — DC + AD DS
-    "win-mssql":    9002,   # Windows Server 2022 — MSSQL + Reporting
-    "webserver":    9003,   # Debian 12 — Apache + PHP + DVWA
-    "linux-vuln":   9004,   # Ubuntu 22.04 — SSH/FTP/SMB services
-    "workstation":  9005,   # Windows 10 — Domain workstation
-}
-
-# ── VM definitions per game mode ───────────────────────────
-# ip_offset: last octet of 10.X.X.<offset>
-GAME_VMS = {
-    GameMode.initial_access: [
-        {"name": "kali",       "template": "kali",      "team": "red",  "ip_offset": 50,
-         "display": "Kali Linux (Attacker)", "role": "attacker"},
-        {"name": "webserver",  "template": "webserver", "team": "blue", "ip_offset": 10,
-         "display": "Web Server (DMZ)",      "role": "web"},
-        {"name": "win-dc",     "template": "win-dc",    "team": "blue", "ip_offset": 20,
-         "display": "DC-01 (Domain Controller)", "role": "dc-primary"},
-        {"name": "workstation","template": "workstation","team": "blue", "ip_offset": 30,
-         "display": "WS-01 (Workstation)",   "role": "workstation"},
-    ],
-    GameMode.full_compromise: [
-        {"name": "kali",       "template": "kali",       "team": "red",  "ip_offset": 50,
-         "display": "Kali Linux (Attacker)",  "role": "attacker"},
-        {"name": "webserver",  "template": "webserver",  "team": "blue", "ip_offset": 10,
-         "display": "Web Server (DMZ)",       "role": "web"},
-        {"name": "win-dc",     "template": "win-dc",     "team": "blue", "ip_offset": 20,
-         "display": "DC-01 (Primary DC)",     "role": "dc-primary"},
-        {"name": "win-mssql",  "template": "win-mssql",  "team": "blue", "ip_offset": 21,
-         "display": "DC-02 (MSSQL Server)",   "role": "dc-mssql"},
-        {"name": "linux-vuln", "template": "linux-vuln", "team": "blue", "ip_offset": 30,
-         "display": "SRV-01 (Linux Services)","role": "linux"},
-        {"name": "workstation","template": "workstation","team": "blue", "ip_offset": 40,
-         "display": "WS-01 (Workstation)",    "role": "workstation"},
-    ],
-    GameMode.ransomware_sim: [
-        {"name": "kali",       "template": "kali",       "team": "red",  "ip_offset": 50,
-         "display": "Kali Linux (Attacker)",  "role": "attacker"},
-        {"name": "webserver",  "template": "webserver",  "team": "blue", "ip_offset": 10,
-         "display": "Web Server",             "role": "web"},
-        {"name": "win-dc",     "template": "win-dc",     "team": "blue", "ip_offset": 20,
-         "display": "DC-01 (Primary DC)",     "role": "dc-primary"},
-        {"name": "win-mssql",  "template": "win-mssql",  "team": "blue", "ip_offset": 21,
-         "display": "DC-02 (MSSQL + Backup)", "role": "dc-mssql"},
-        {"name": "linux-vuln", "template": "linux-vuln", "team": "blue", "ip_offset": 30,
-         "display": "SRV-01 (File Server)",   "role": "linux"},
-        {"name": "workstation","template": "workstation","team": "blue", "ip_offset": 40,
-         "display": "WS-01 (Workstation)",    "role": "workstation"},
-    ],
-    GameMode.purple_team: [
-        {"name": "kali",       "template": "kali",       "team": "red",  "ip_offset": 50,
-         "display": "Kali Linux (Red Team)",  "role": "attacker"},
-        {"name": "win-dc",     "template": "win-dc",     "team": "blue", "ip_offset": 20,
-         "display": "DC-01 (Domain Controller)", "role": "dc-primary"},
-        {"name": "win-mssql",  "template": "win-mssql",  "team": "blue", "ip_offset": 21,
-         "display": "DC-02 (MSSQL)",          "role": "dc-mssql"},
-        {"name": "linux-vuln", "template": "linux-vuln", "team": "blue", "ip_offset": 30,
-         "display": "SRV-01 (Linux Services)","role": "linux"},
-    ],
-}
 
 # ── Vulnerability pool ─────────────────────────────────────
 VULN_POOL = {
@@ -142,14 +81,8 @@ POINTS = {
     "detection_bonus":        500,  # Blue team detects + blocks Red
 }
 
-# Services checked per VM role
-SERVICES_TO_CHECK = {
-    "web":          [("http",  80), ("https", 443)],
-    "dc-primary":   [("rdp",  3389), ("ldap", 389), ("dns", 53)],
-    "dc-mssql":     [("rdp",  3389), ("mssql", 1433)],
-    "linux":        [("ssh",   22), ("http", 80)],
-    "workstation":  [("rdp",  3389)],
-}
+# NOTE: SERVICES_TO_CHECK and DEFAULT_CREDS are imported from vm_config
+# (single source of truth) — do not redefine them here.
 
 
 class SessionManager:
@@ -447,15 +380,24 @@ class SessionManager:
         for (vm, _, _, _, ip) in vm_records:
             if vm.status != VMStatus.running:
                 continue
-            user = "Administrator" if "win" in vm.vm_type else "root"
-            conn = "winrm" if "win" in vm.vm_type else "ssh"
+            if vm.role == "attacker":
+                # The Kali box is the Red Team's tool — never configured by us.
+                continue
+            win = is_windows(vm.vm_type)
+            user = "Administrator" if win else "root"
+            conn = "winrm" if win else "ssh"
+            extra = (" ansible_password=Coco2024! ansible_winrm_transport=basic "
+                     "ansible_winrm_server_cert_validation=ignore ansible_port=5985"
+                     if win else " ansible_password=coco2024")
             lines.append(
                 f"{vm.name} ansible_host={ip} ansible_user={user} "
-                f"ansible_connection={conn} vm_role={vm.role}\n"
+                f"ansible_connection={conn}{extra} vm_role={vm.role}\n"
             )
 
         role_groups = {}
         for (vm, *_) in vm_records:
+            if vm.role == "attacker":
+                continue
             role_groups.setdefault(vm.role, []).append(vm.name)
         for role, members in role_groups.items():
             lines.append(f"\n[{role}]\n")
@@ -474,14 +416,24 @@ class SessionManager:
         with open(vuln_vars_path, "w") as f:
             json.dump(vuln_vars, f)
 
+        # Choose the playbook: fully-Linux sessions use the collection-free
+        # deploy-linux.yml (works even without the Windows Galaxy collections);
+        # anything with a Windows VM uses the full deploy-session.yml.
+        has_windows = any(
+            is_windows(vm.vm_type)
+            for (vm, *_ ) in vm_records
+            if vm.status == VMStatus.running
+        )
+        playbook_name = "deploy-session.yml" if has_windows else "deploy-linux.yml"
         playbook = os.path.join(
             settings.coco_repo_dir,
-            "ansible", "deploy-session.yml"
+            "ansible", playbook_name
         )
         if not os.path.exists(playbook):
             self._event(game, "ansible_skip",
                         f"Playbook not found: {playbook} — skipping Ansible")
             return
+        self._event(game, "ansible_playbook", f"Using {playbook_name}")
 
         cmd = [
             "ansible-playbook", playbook,
@@ -491,11 +443,19 @@ class SessionManager:
             "-v",
         ]
 
+        ansible_dir = os.path.join(settings.coco_repo_dir, "ansible")
+        env = dict(os.environ)
+        env["ANSIBLE_HOST_KEY_CHECKING"] = "False"
+        env["ANSIBLE_CONFIG"] = os.path.join(ansible_dir, "ansible.cfg")
+        env["ANSIBLE_ROLES_PATH"] = os.path.join(ansible_dir, "roles")
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=ansible_dir,
+                env=env,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
             if proc.returncode != 0:
@@ -527,14 +487,10 @@ class SessionManager:
         except Exception:
             return ""
 
-        protocol = "rdp" if "win" in vm.vm_type else "ssh"
+        protocol = "rdp" if is_windows(vm.vm_type) else "ssh"
         conn_id  = f"game{vm.game_id}-{vm.name}"
 
-        default_creds = {
-            "rdp": ("Administrator", "Coco2024!"),
-            "ssh": ("root", "coco2024"),
-        }
-        username, password = default_creds[protocol]
+        username, password = DEFAULT_CREDS[protocol]
 
         for auth in root.findall("authorize"):
             existing = [c.get("name") for c in auth.findall("connection")]
@@ -584,22 +540,30 @@ class SessionManager:
     # ═══════════════════════════════════════════════════════
     # HELPERS
     # ═══════════════════════════════════════════════════════
-    def _select_vulns(self, difficulty: str) -> list:
-        count = VULNS_PER_CATEGORY.get(str(difficulty), 2)
+    def _select_vulns(self, difficulty) -> list:
+        # difficulty is a VulnDifficulty enum (str subclass). Use its value so
+        # "easy"/"medium"/"hard" resolve correctly (str(enum) would give
+        # "VulnDifficulty.medium" on some Python versions).
+        key = getattr(difficulty, "value", str(difficulty))
+        count = VULNS_PER_CATEGORY.get(key, 2)
         selected = []
         for category, vulns in VULN_POOL.items():
             selected.extend(random.sample(vulns, min(count, len(vulns))))
         return selected
 
     def _vuln_applies_to_role(self, vuln: str, role: str) -> bool:
+        ad_common = ["ad_kerberoastable_svc", "ad_asrep_roasting",
+                     "ad_password_spray", "smb_signing_disabled",
+                     "smb_anonymous_read", "ad_krbtgt_old",
+                     "win_weak_gpo", "win_unquoted_service",
+                     "scheduled_task_writable", "registry_autorun"]
         mapping = {
             "web":          ["webserver_sqli", "webserver_rce_upload", "webserver_lfi"],
-            "dc-primary":   ["ad_kerberoastable_svc", "ad_asrep_roasting",
-                             "ad_password_spray", "smb_signing_disabled",
-                             "smb_anonymous_read", "ad_krbtgt_old",
-                             "win_weak_gpo", "win_unquoted_service",
-                             "scheduled_task_writable", "registry_autorun"],
+            "dc-primary":   ad_common,
+            "dc-secondary": ad_common,
             "dc-mssql":     ["mssql_xp_cmdshell", "mssql_sa_weak_password",
+                             "win_unquoted_service"],
+            "fileserver":   ["smb_anonymous_read", "smb_signing_disabled",
                              "win_unquoted_service"],
             "linux":        ["linux_suid_bash", "linux_sudo_nopasswd",
                              "smb_anonymous_read"],
@@ -608,25 +572,34 @@ class SessionManager:
         return vuln in mapping.get(role, [])
 
     def _build_flags_config(self, mode: GameMode) -> list:
+        # One flag per "flag-worthy" blue VM in the mode. The `service` value
+        # is the VM `name` so Ansible's place_flags.yml knows where to drop it.
+        # Points scale with how deep into the network the VM is.
+        points_by_role = {
+            "web":          100,
+            "linux":        200,
+            "fileserver":   300,
+            "dc-mssql":     400,
+            "dc-primary":   500,
+            "dc-secondary": 500,
+        }
         flags = []
-        services = {
-            GameMode.initial_access:  ["webserver", "win-dc"],
-            GameMode.full_compromise: ["webserver", "win-dc", "win-mssql", "linux-vuln"],
-            GameMode.ransomware_sim:  ["webserver", "win-dc", "win-mssql", "linux-vuln"],
-            GameMode.purple_team:     ["win-dc", "win-mssql"],
-        }
-        points_map = {
-            "webserver":  100,
-            "win-dc":     300,
-            "win-mssql":  500,
-            "linux-vuln": 200,
-        }
-        for svc in services.get(mode, []):
+        seen = set()
+        for vm_def in GAME_VMS.get(mode, []):
+            if vm_def["team"] != "blue":
+                continue
+            role = vm_def["role"]
+            if role not in points_by_role:
+                continue          # workstation / siem don't hold flags
+            if vm_def["name"] in seen:
+                continue
+            seen.add(vm_def["name"])
             flags.append({
-                "service":    svc,
-                "flag_value": f"COCO{{{secrets.token_hex(12)}}}",
-                "points":     points_map.get(svc, 100),
-                "captured":   False,
+                "service":     vm_def["name"],
+                "display":     vm_def["display"],
+                "flag_value":  f"COCO{{{secrets.token_hex(12)}}}",
+                "points":      points_by_role[role],
+                "captured":    False,
                 "captured_by": None,
             })
         return flags

@@ -1,0 +1,26 @@
+---
+# roles/dc-primary/tasks/main.yml
+# ADVANCED / best-effort. Promotes the first Windows host into a domain
+# controller for corp.coco.local. Requires the win2022 template and the
+# ansible.windows + community.windows collections (see ansible/requirements.yml).
+# Every task is guarded so a failure never aborts the whole session.
+
+- name: "[dc-primary] Set static-ish hostname"
+  ansible.windows.win_hostname:
+    name: DC01
+  register: _rename
+  ignore_errors: true
+
+- name: "[dc-primary] Install AD DS role"
+  ansible.windows.win_feature:
+    name: AD-Domain-Services
+    include_management_tools: true
+    state: present
+  ignore_errors: true
+
+- name: "[dc-primary] Create the forest {{ domain_name | default('corp.coco.local') }}"
+  microsoft.ad.domain:
+    dns_domain_name: "{{ domain_name | default('corp.coco.local') }}"
+    safe_mode_password: "{{ admin_password | default('Coco2024!') }}"
+    reboot: true
+  ignore_errors: true

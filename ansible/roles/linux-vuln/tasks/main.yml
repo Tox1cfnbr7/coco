@@ -1,0 +1,26 @@
+---
+# roles/linux-vuln/tasks/main.yml
+# Prepares a Debian "Linux services" VM as a target for the linux_* / smb_* vulns.
+
+- name: "[linux] Ensure SSH + Samba available"
+  ansible.builtin.package:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - openssh-server
+    - samba
+  ignore_errors: true
+
+- name: "[linux] Ensure a public Samba share directory exists"
+  ansible.builtin.file:
+    path: /srv/samba/public
+    state: directory
+    mode: "0777"
+  ignore_errors: true
+
+- name: "[linux] Ensure SSH is running"
+  ansible.builtin.service:
+    name: ssh
+    state: started
+    enabled: true
+  ignore_errors: true

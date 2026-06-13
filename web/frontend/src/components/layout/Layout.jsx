@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import {
-  LayoutDashboard, Sword, Target, Terminal,
+  LayoutDashboard, Target, Terminal,
   Server, Settings, LogOut, Sun, Moon, Shield,
 } from 'lucide-react'
 import useAuthStore from '../../store/auth'
@@ -11,7 +11,6 @@ const nav = [
   { section: 'Overview' },
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/sessions',  icon: Shield,          label: 'Sessions' },
-  { to: '/games',     icon: Sword,           label: 'Games' },
   { section: 'Session' },
   { to: '/terminal',  icon: Terminal,        label: 'Terminal' },
   { to: '/vms',       icon: Server,          label: 'VMs' },

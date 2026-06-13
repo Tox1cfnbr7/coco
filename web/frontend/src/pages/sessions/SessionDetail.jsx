@@ -96,6 +96,40 @@ export default function SessionDetail() {
   const isRunning = session.status === 'running'
   const isAdmin   = user?.role === 'admin'
 
+  // ── Red Team win → full-screen "YOU GOT HACKED" takeover ──
+  const endEvent = scoreboard?.events?.find(
+    e => e.type === 'red_wins' || e.type === 'blue_lost_downtime'
+  )
+  const allFlagsCaptured =
+    scoreboard?.flags?.length > 0 && scoreboard.flags.every(f => f.captured)
+  const redWon = session.status === 'ended' && (endEvent || allFlagsCaptured)
+
+  if (redWon) {
+    return (
+      <div style={{
+        minHeight: '100vh', background: '#0a0000',
+        display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center',
+        color: '#cc0000', textAlign: 'center', padding: 24,
+      }}>
+        <div style={{ fontSize: 110, lineHeight: 1, marginBottom: 24 }}>☠</div>
+        <div style={{ fontSize: 40, fontWeight: 800, letterSpacing: 8, marginBottom: 14 }}>
+          YOU GOT HACKED
+        </div>
+        <div style={{ fontSize: 14, color: '#aa0000', letterSpacing: 1, marginBottom: 8 }}>
+          {endEvent?.detail || 'Red Team captured every flag.'}
+        </div>
+        <div style={{ fontSize: 12, color: '#770000', marginBottom: 40 }}>
+          All defended systems have been shut down.
+        </div>
+        <button onClick={() => navigate('/sessions')} className="btn"
+          style={{ color: '#cc0000', borderColor: '#cc0000', fontSize: 12 }}>
+          Back to sessions
+        </button>
+      </div>
+    )
+  }
+
   const killAction = isAdmin && ['running', 'provisioning', 'error'].includes(session.status) && (
     <button className="btn" style={{ color: 'var(--red)' }} onClick={handleKill}>
       <Skull size={13} /> Kill Session

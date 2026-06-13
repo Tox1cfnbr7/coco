@@ -1,0 +1,22 @@
+---
+# roles/dc-mssql/tasks/main.yml
+# ADVANCED / best-effort. Prepares an MSSQL host. Real MSSQL install is left to
+# the operator (licensing/size); this only opens the firewall and marks the box
+# so the mssql_* vulns and service checks have a target.
+
+- name: "[mssql] Open TCP 1433 in the Windows firewall"
+  community.windows.win_firewall_rule:
+    name: COCO-MSSQL
+    localport: 1433
+    action: allow
+    direction: in
+    protocol: tcp
+    state: present
+    enabled: true
+  ignore_errors: true
+
+- name: "[mssql] Marker file"
+  ansible.windows.win_copy:
+    dest: 'C:\coco-mssql.txt'
+    content: "COCO MSSQL host\r\n"
+  ignore_errors: true

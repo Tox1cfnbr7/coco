@@ -13,7 +13,7 @@ import os
 
 from core.config import get_settings
 from core.database import engine, Base
-from routes import auth, games, admin, guacamole, sessions
+from routes import auth, admin, guacamole, sessions
 
 settings = get_settings()
 logger   = logging.getLogger("coco")
@@ -67,7 +67,6 @@ async def security_headers(request: Request, call_next):
 
 # ── API Routes ─────────────────────────────────────────────
 app.include_router(auth.router,     prefix="/api")
-app.include_router(games.router,    prefix="/api")
 app.include_router(admin.router,    prefix="/api")
 app.include_router(sessions.router, prefix="/api")
 app.include_router(guacamole.router)

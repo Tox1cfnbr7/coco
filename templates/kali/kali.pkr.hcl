@@ -18,6 +18,19 @@ variable "iso_storage"      { type = string; default = "local" }
 variable "vm_id"   { type = string; default = "9000" }
 variable "vm_name" { type = string; default = "coco-tpl-kali" }
 
+# Kali ISO — overridable. The checksum uses Packer's self-validating "file:"
+# form so it never goes stale when Kali ships a new point release: Packer
+# downloads SHA256SUMS and matches the ISO filename automatically.
+# Override at build time:  -var "iso_url=...  -var iso_checksum=..."
+variable "iso_url" {
+  type    = string
+  default = "https://cdimage.kali.org/kali-2025.4/kali-linux-2025.4-installer-amd64.iso"
+}
+variable "iso_checksum" {
+  type    = string
+  default = "file:https://cdimage.kali.org/kali-2025.4/SHA256SUMS"
+}
+
 # ── Source ──────────────────────────────────────────────────
 source "proxmox-iso" "kali" {
   proxmox_url              = var.proxmox_url
@@ -35,9 +48,9 @@ source "proxmox-iso" "kali" {
   cpu_type = "host"
   qemu_agent = true
 
-  # Kali 2024.4 — auto downloaded by Packer, no manual upload needed
-  iso_url      = "https://cdimage.kali.org/kali-2024.4/kali-linux-2024.4-installer-amd64.iso"
-  iso_checksum = "sha256:beca4f8fd7f58eda290812f538e1323d3ba1f1a34df4b203e85de4be42525bb6"
+  # Kali installer — auto downloaded by Packer, no manual upload needed
+  iso_url      = var.iso_url
+  iso_checksum = var.iso_checksum
   iso_storage_pool = var.iso_storage
   unmount_iso  = true
 

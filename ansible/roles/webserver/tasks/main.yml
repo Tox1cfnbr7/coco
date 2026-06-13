@@ -1,0 +1,42 @@
+---
+# roles/webserver/tasks/main.yml
+# Configures the Debian web VM (built from the debian12 template, which already
+# ships Apache + PHP + MariaDB + DVWA). This role makes the box game-ready and
+# provides a target for the webserver_* vulnerabilities.
+
+- name: "[web] Ensure Apache + MariaDB are running"
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - apache2
+    - mariadb
+  ignore_errors: true
+
+- name: "[web] Deploy a simple login app (target for the SQLi vuln injector)"
+  ansible.builtin.copy:
+    dest: /var/www/html/login.php
+    mode: "0644"
+    content: |
+      <?php
+      // COCO demo login. The vulns role rewrites this to introduce SQLi.
+      $pdo = new PDO('mysql:host=localhost;dbname=mysql', 'root', '');
+      if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+          $stmt = $pdo->prepare('SELECT * FROM user WHERE User = ? AND authentication_string = ?');
+          $stmt->execute([$_POST['username'] ?? '', md5($_POST['password'] ?? '')]);
+          echo $stmt->fetch() ? 'Welcome' : 'Invalid credentials';
+      }
+      ?>
+      <form method="post">
+        <input name="username" placeholder="user">
+        <input name="password" type="password" placeholder="pass">
+        <button>Login</button>
+      </form>
+  ignore_errors: true
+
+- name: "[web] Reload Apache"
+  ansible.builtin.service:
+    name: apache2
+    state: reloaded
+  ignore_errors: true

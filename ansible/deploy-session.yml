@@ -5,6 +5,7 @@
 - name: Wait for all VMs to be reachable
   hosts: all
   gather_facts: false
+  ignore_unreachable: true
   tasks:
     - name: Wait for connection
       ansible.builtin.wait_for_connection:
@@ -14,6 +15,7 @@
 - name: Configure Primary Domain Controller (DC-01)
   hosts: dc-primary
   gather_facts: true
+  ignore_unreachable: true
   roles:
     - common
     - dc-primary
@@ -25,6 +27,7 @@
 - name: Configure Secondary DC + Certificate Authority (DC-02)
   hosts: dc-secondary
   gather_facts: true
+  ignore_unreachable: true
   roles:
     - common
     - dc-secondary
@@ -37,6 +40,7 @@
 - name: Configure MSSQL Server
   hosts: dc-mssql
   gather_facts: true
+  ignore_unreachable: true
   roles:
     - common
     - dc-mssql
@@ -47,6 +51,7 @@
 - name: Configure Web Server
   hosts: web
   gather_facts: true
+  ignore_unreachable: true
   roles:
     - common
     - webserver
@@ -54,6 +59,7 @@
 - name: Configure Linux Services
   hosts: linux
   gather_facts: true
+  ignore_unreachable: true
   roles:
     - common
     - linux-vuln
@@ -61,6 +67,7 @@
 - name: Configure File Server
   hosts: fileserver
   gather_facts: true
+  ignore_unreachable: true
   roles:
     - common
     - srv-file
@@ -68,6 +75,7 @@
 - name: Configure Workstations
   hosts: workstation
   gather_facts: true
+  ignore_unreachable: true
   roles:
     - common
   vars:
@@ -77,18 +85,21 @@
 - name: Start SIEM Stack
   hosts: siem
   gather_facts: true
+  ignore_unreachable: true
   roles:
     - siem-stack
 
 - name: Install Sysmon on all Windows VMs
   hosts: dc-primary,dc-secondary,dc-mssql,workstation,fileserver
   gather_facts: false
+  ignore_unreachable: true
   roles:
     - sysmon
 
 - name: Deploy Wazuh agents on all VMs (point to SIEM)
   hosts: dc-primary,dc-secondary,dc-mssql,web,linux,workstation,fileserver
   gather_facts: false
+  ignore_unreachable: true
   roles:
     - wazuh-agent
   vars:
@@ -98,6 +109,7 @@
 - name: Inject Vulnerabilities
   hosts: all
   gather_facts: false
+  ignore_unreachable: true
   tasks:
     - name: Run vuln injection
       ansible.builtin.include_role:
@@ -108,6 +120,7 @@
 - name: Place flags
   hosts: all
   gather_facts: false
+  ignore_unreachable: true
   tasks:
     - name: Place flag files on services
       ansible.builtin.include_tasks: roles/common/tasks/place_flags.yml

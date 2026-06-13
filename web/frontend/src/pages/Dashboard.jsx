@@ -1,28 +1,33 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Plus } from 'lucide-react'
-import { gamesApi, adminApi } from '../../lib/api'
-import useAuthStore from '../../store/auth'
-import Layout from '../../components/layout/Layout'
+import { sessionsApi, adminApi } from '../lib/api'
+import useAuthStore from '../store/auth'
+import Layout from '../components/layout/Layout'
 
-const COL = 'grid-template-columns: 2fr 1fr 1fr 90px'
+const MODE_LABELS = {
+  initial_access:  'Initial Access',
+  full_compromise: 'Full Compromise',
+  ransomware_sim:  'Ransomware Sim',
+  purple_team:     'Purple Team',
+}
 
 export default function Dashboard() {
-  const [games, setGames] = useState([])
+  const [sessions, setSessions] = useState([])
   const [stats, setStats] = useState(null)
   const { user } = useAuthStore()
   const navigate = useNavigate()
 
   useEffect(() => {
-    gamesApi.list().then(r => setGames(r.data)).catch(() => {})
+    sessionsApi.list().then(r => setSessions(r.data)).catch(() => {})
     if (user?.role === 'admin') {
       adminApi.stats().then(r => setStats(r.data)).catch(() => {})
     }
   }, [])
 
   const action = user?.role === 'admin' && (
-    <button className="btn btn-solid" onClick={() => navigate('/games/new')}>
-      <Plus size={13} /> New game
+    <button className="btn btn-solid" onClick={() => navigate('/sessions')}>
+      <Plus size={13} /> New session
     </button>
   )
 
@@ -33,35 +38,35 @@ export default function Dashboard() {
         {stats && (
           <div style={{ display: 'flex', gap: 40, paddingBottom: 20, borderBottom: '1px solid var(--border)', marginBottom: 20 }}>
             {[
-              { n: stats.running_games, l: 'Running games' },
+              { n: stats.running_games, l: 'Running sessions' },
               { n: stats.flags_captured, l: 'Flags captured', c: 'var(--red)' },
               { n: stats.total_users, l: 'Total players' },
-              { n: stats.total_games, l: 'Total games' },
+              { n: stats.total_games, l: 'Total sessions' },
             ].map(({ n, l, c }) => (
               <div key={l}>
-                <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: -0.5, color: c || 'var(--text)' }}>{n}</div>
+                <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: -0.5, color: c || 'var(--text)' }}>{n ?? '—'}</div>
                 <div style={{ fontSize: 11, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>{l}</div>
               </div>
             ))}
           </div>
         )}
 
-        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 90px', padding: '7px 0', borderBottom: '1px solid var(--border)', marginBottom: 2 }}>
-          {['Game', 'Mode', 'Status', 'Timer'].map(h => (
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 110px', padding: '7px 0', borderBottom: '1px solid var(--border)', marginBottom: 2 }}>
+          {['Session', 'Mode', 'Status', 'Difficulty'].map(h => (
             <div key={h} style={{ fontSize: 10, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</div>
           ))}
         </div>
 
-        {games.length === 0 && (
+        {sessions.length === 0 && (
           <div style={{ padding: '32px 0', color: 'var(--text3)', fontSize: 13 }}>
-            No games yet.{user?.role === 'admin' ? ' Create one above.' : ' Wait for an admin to create a game.'}
+            No sessions yet.{user?.role === 'admin' ? ' Create one from the Sessions page.' : ' Wait for an admin to create a session.'}
           </div>
         )}
 
-        {games.map(g => (
-          <div key={g.id} onClick={() => navigate(`/games/${g.id}`)}
+        {sessions.map(s => (
+          <div key={s.id} onClick={() => navigate(`/sessions/${s.id}`)}
             style={{
-              display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 90px',
+              display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 110px',
               padding: '11px 0', borderBottom: '1px solid var(--border)',
               cursor: 'pointer', alignItems: 'center',
             }}
@@ -69,17 +74,17 @@ export default function Dashboard() {
             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
           >
             <div>
-              <div style={{ fontWeight: 500 }}>{g.name}</div>
-              <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 2 }}>{g.duration}</div>
+              <div style={{ fontWeight: 500 }}>{s.name}</div>
+              <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 2 }}>{s.duration}</div>
             </div>
-            <div style={{ color: 'var(--text2)' }}>{g.mode?.replace('_', ' ')}</div>
+            <div style={{ color: 'var(--text2)' }}>{MODE_LABELS[s.mode] || s.mode}</div>
             <div>
-              <span className={`tag tag-${g.status === 'running' ? 'run' : g.status === 'waiting' ? 'wait' : 'end'}`}>
-                {g.status}
+              <span className={`tag tag-${s.status === 'running' ? 'run' : s.status === 'waiting' ? 'wait' : s.status === 'error' ? 'err' : 'end'}`}>
+                {s.status}
               </span>
             </div>
             <div className="mono" style={{ fontSize: 12, color: 'var(--text2)' }}>
-              {g.status === 'running' ? '—:——:——' : '—'}
+              {s.difficulty || '—'}
             </div>
           </div>
         ))}

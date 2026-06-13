@@ -17,7 +17,16 @@ variable "vm_id"            { type = string; default = "9002" }
 variable "vm_name"          { type = string; default = "coco-tpl-dc02-ca" }
 
 variable "win_iso_url" {
-  default = "https://software-static.download.prss.microsoft.com/sg/download/888969d5-f34g-4e03-ac9d-1f9786c69161/SERVER_EVAL_x64FRE_en-us.iso"
+  default = "https://software-static.download.prss.microsoft.com/sg/download/888969d5-f34g-4e03-ac9d-1f9786c66749/SERVER_EVAL_x64FRE_en-us.iso"
+}
+
+# RECOMMENDED for Windows: pre-stage the eval ISO in Proxmox storage and set this
+# to e.g. "local:iso/SERVER_EVAL_x64FRE_en-us.iso". Microsoft's direct eval URLs
+# rotate and require accepting a EULA, so an uploaded ISO is the reliable path.
+# When set, it takes precedence over win_iso_url.
+variable "win_iso_file" {
+  type    = string
+  default = ""
 }
 variable "win_iso_checksum" {
   default = "sha256:3e4fa6d8507b554856fc9ca6079cc402df11a8b79344871669f0251535255325"
@@ -26,7 +35,8 @@ variable "virtio_iso_url" {
   default = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 }
 variable "virtio_iso_checksum" {
-  default = "sha256:3e7a91afc8a9e76c4b4a6c28e0e3e34b0db6e27f0fe4a52add1f07827d5c5bc7"
+  type    = string
+  default = "none"
 }
 
 source "proxmox-iso" "dc02-ca" {
@@ -44,8 +54,9 @@ source "proxmox-iso" "dc02-ca" {
   cpu_type = "host"
   qemu_agent = true
 
-  iso_url          = var.win_iso_url
-  iso_checksum     = var.win_iso_checksum
+  iso_file     = var.win_iso_file != "" ? var.win_iso_file : null
+  iso_url      = var.win_iso_file != "" ? null : var.win_iso_url
+  iso_checksum = var.win_iso_file != "" ? null : var.win_iso_checksum
   iso_storage_pool = var.iso_storage
   unmount_iso      = true
 

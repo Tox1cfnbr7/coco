@@ -1,18 +1,26 @@
 ---
-# webserver_sqli.yml — Activate SQL injection in login form
-- name: "[VULN] webserver_sqli — Enable SQLi in login form"
-  ansible.builtin.lineinfile:
-    path: /var/www/html/login.php
-    regexp: ".*prepared.*statement.*"
-    line: "// VULN: raw query (no prepared statement)"
-    backrefs: yes
-  when: "'web' in vm_role"
-  ignore_errors: true
-
-- name: "[VULN] webserver_sqli — Patch login.php to use raw query"
-  ansible.builtin.replace:
-    path: /var/www/html/login.php
-    regexp: '\$stmt\s*=\s*\$pdo->prepare\(.*\)'
-    replace: '$result = $pdo->query("SELECT * FROM users WHERE username=\'" . $_POST[\'username\'] . "\' AND password=\'" . md5($_POST[\'password\']) . "\'")'
+# webserver_sqli.yml — replace the demo login with a SQL-injectable version.
+# Blue Team patches by restoring a parameterised query.
+- name: "[VULN] webserver_sqli — deploy injectable login.php"
+  ansible.builtin.copy:
+    dest: /var/www/html/login.php
+    mode: "0644"
+    content: |
+      <?php
+      // VULN: user input concatenated straight into the SQL query (SQLi).
+      $pdo = new PDO('mysql:host=localhost;dbname=mysql', 'root', '');
+      if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+          $u = $_POST['username'] ?? '';
+          $p = $_POST['password'] ?? '';
+          $sql = "SELECT * FROM user WHERE User = '$u' AND authentication_string = '" . md5($p) . "'";
+          $row = $pdo->query($sql)->fetch();
+          echo $row ? 'Welcome' : 'Invalid credentials';
+      }
+      ?>
+      <form method="post">
+        <input name="username" placeholder="user">
+        <input name="password" type="password" placeholder="pass">
+        <button>Login</button>
+      </form>
   when: "'web' in vm_role"
   ignore_errors: true

@@ -1,0 +1,19 @@
+---
+# roles/common/tasks/main.yml
+# Lightweight base config applied to every managed VM (Linux + Windows).
+- name: "[common] Linux — ensure base tooling present"
+  ansible.builtin.package:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - curl
+  when: ansible_connection != 'winrm'
+  ignore_errors: true
+
+- name: "[common] Mark host as COCO-managed (Linux)"
+  ansible.builtin.copy:
+    dest: /etc/coco-managed
+    content: "game_id={{ coco_game_id | default('?') }}\nmode={{ coco_mode | default('?') }}\n"
+    mode: "0644"
+  when: ansible_connection != 'winrm'
+  ignore_errors: true

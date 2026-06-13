@@ -1,3 +1,8 @@
+> NOTE: The sections below are conceptual background. The web-GUI's actual
+> session modes are: Initial Access, Full Compromise, Ransomware Sim and
+> Purple Team (see the main README). "Active Directory" maps to the AD-based
+> modes, "Web Application" to the Debian web VM used across modes.
+
 # COCO Game Modes
 
 ## Active Directory

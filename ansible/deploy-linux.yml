@@ -1,0 +1,57 @@
+---
+# COCO — deploy-linux.yml
+# Collection-free deployment for fully-Linux game modes (e.g. initial_access).
+# Uses only ansible.builtin in its static roles so it runs even when the
+# Windows Galaxy collections are not installed. SessionManager selects this
+# playbook automatically when a session has no Windows VMs.
+
+- name: Wait for Linux VMs to be reachable
+  hosts: all
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - name: Wait for SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        sleep: 10
+
+- name: Configure Web Server
+  hosts: web
+  gather_facts: true
+  ignore_unreachable: true
+  roles:
+    - common
+    - webserver
+
+- name: Configure Linux Services
+  hosts: linux
+  gather_facts: true
+  ignore_unreachable: true
+  roles:
+    - common
+    - linux-vuln
+
+- name: Inject vulnerabilities (Linux subset)
+  hosts: all
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - name: Run vuln injection (builtin-only vulns; keeps this path collection-free)
+      ansible.builtin.include_role:
+        name: vulns
+      vars:
+        active_vulns: >-
+          {{ (coco_active_vulns | default([])) | intersect([
+               'webserver_sqli', 'webserver_rce_upload', 'webserver_lfi',
+               'linux_suid_bash', 'linux_sudo_nopasswd'
+             ]) }}
+
+- name: Place flags
+  hosts: all
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - name: Place flag files (Linux)
+      ansible.builtin.include_tasks: roles/common/tasks/place_flags_linux.yml
+      vars:
+        game_flags: "{{ coco_flags | default([]) }}"

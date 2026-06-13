@@ -1,0 +1,19 @@
+---
+# roles/common/tasks/place_flags_linux.yml
+# Linux-only flag placement (uses ansible.builtin only, so the lean game path
+# has zero dependency on Windows collections).
+- name: "[flags] Determine this host's flag"
+  ansible.builtin.set_fact:
+    _my_flag: "{{ (game_flags | default([]) | selectattr('service','equalto', inventory_hostname) | list | first) | default(None) }}"
+
+- name: "[flags] Place flag on web root, /flag.txt and root home"
+  ansible.builtin.copy:
+    dest: "{{ item }}"
+    content: "{{ _my_flag.flag_value }}\n"
+    mode: "0644"
+  loop:
+    - /flag.txt
+    - /root/flag.txt
+    - /var/www/html/flag.txt
+  when: _my_flag is not none
+  ignore_errors: true

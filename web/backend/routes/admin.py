@@ -16,7 +16,7 @@ from typing import Optional
 from core.database import get_db
 from core.security import require_admin, get_current_user
 from models.user import User
-from models.game import Game, VM, GameStatus, VMStatus
+from models.game import Game, VM, GameStatus, VMStatus, CapturedFlag
 from services.proxmox import get_proxmox
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -167,7 +167,6 @@ async def list_templates(_=Depends(require_admin)):
         "win2022":   {"label": "Windows Server 2022","role": "dc/mssql","ram_gb": 8,  "disk_gb": 80},
         "win10":     {"label": "Windows 10",        "role": "workstation","ram_gb": 4,"disk_gb": 60},
         "dc02-ca":   {"label": "Win Server 2022 CA","role": "dc-ca",   "ram_gb": 4,  "disk_gb": 60},
-        "srv-file":  {"label": "File Server",       "role": "fileserver","ram_gb": 2, "disk_gb": 60},
         "siem":      {"label": "SIEM (Elastic+Wazuh)","role": "siem",  "ram_gb": 16, "disk_gb": 100},
     }
 
@@ -442,10 +441,11 @@ def toggle_user(user_id: int, db: Session = Depends(get_db), _=Depends(require_a
 @router.get("/stats")
 def system_stats(db: Session = Depends(get_db), _=Depends(require_admin)):
     return {
-        "total_users":   db.query(User).count(),
-        "active_users":  db.query(User).filter(User.is_active == True).count(),
-        "total_games":   db.query(Game).count(),
-        "running_games": db.query(Game).filter(Game.status == "running").count(),
+        "total_users":    db.query(User).count(),
+        "active_users":   db.query(User).filter(User.is_active == True).count(),
+        "total_games":    db.query(Game).count(),
+        "running_games":  db.query(Game).filter(Game.status == "running").count(),
+        "flags_captured": db.query(CapturedFlag).count(),
     }
 
 

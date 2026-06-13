@@ -998,6 +998,14 @@ EOF
 step_ansible() {
   run_cmd "Installing Ansible" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ansible ansible-core
   command -v ansible >/dev/null 2>&1 && success "$(ansible --version | head -n1)"
+
+  # Galaxy collections for the Windows / Active Directory roles. The Linux game
+  # path (deploy-linux.yml) needs none of these, so a failure here is non-fatal.
+  local req="${COCO_REPO_DIR}/ansible/requirements.yml"
+  if [[ -f "$req" ]]; then
+    run_cmd_allow_fail "Installing Ansible Galaxy collections (for Windows roles)" \
+      ansible-galaxy collection install -r "$req"
+  fi
 }
 
 step_packer() {
@@ -1080,12 +1088,6 @@ export const authApi = {
   register: (data) => api.post('/auth/register', data),
   me: () => api.get('/auth/me'),
   generateInvite: (team_type) => api.post(`/auth/invite/generate?team_type=${team_type}`),
-}
-export const gamesApi = {
-  list: () => api.get('/games/'), get: (id) => api.get(`/games/${id}`),
-  create: (data) => api.post('/games/', data), start: (id) => api.post(`/games/${id}/start`),
-  join: (id, code) => api.post(`/games/${id}/join?join_code=${code}`),
-  submitFlag: (id, flag) => api.post(`/games/${id}/flag`, { flag }),
 }
 export const sessionsApi = {
   list: () => api.get('/sessions/'), get: (id) => api.get(`/sessions/${id}`),

@@ -16,6 +16,18 @@ variable "iso_storage"      { type = string; default = "local" }
 variable "vm_id"            { type = string; default = "9006" }
 variable "vm_name"          { type = string; default = "coco-tpl-siem" }
 
+# Ubuntu 22.04 live-server. releases.ubuntu.com/22.04 always holds the latest
+# point release; the "file:" checksum auto-resolves so a new point release does
+# not break the build. Override:  -var "iso_url=..."
+variable "iso_url" {
+  type    = string
+  default = "https://releases.ubuntu.com/22.04/ubuntu-22.04.5-live-server-amd64.iso"
+}
+variable "iso_checksum" {
+  type    = string
+  default = "file:https://releases.ubuntu.com/22.04/SHA256SUMS"
+}
+
 source "proxmox-iso" "siem" {
   proxmox_url              = var.proxmox_url
   username                 = var.proxmox_user
@@ -32,8 +44,8 @@ source "proxmox-iso" "siem" {
   qemu_agent = true
 
   # Ubuntu 22.04 LTS Server
-  iso_url      = "https://releases.ubuntu.com/22.04/ubuntu-22.04.4-live-server-amd64.iso"
-  iso_checksum = "sha256:45f873de9f8cb637345d6e66a583762730bbea30277ef7b32c9c3bd6700a32b2"
+  iso_url      = var.iso_url
+  iso_checksum = var.iso_checksum
   iso_storage_pool = var.iso_storage
   unmount_iso  = true
 

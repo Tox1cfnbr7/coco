@@ -22,6 +22,15 @@ variable "win_iso_url" {
   type    = string
   default = "https://software-static.download.prss.microsoft.com/dbazure/988969d5-f34g-4e03-ac9d-1f9786c69161/19045.2006.220908-0225.22h2_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso"
 }
+
+# RECOMMENDED for Windows: pre-stage the eval ISO in Proxmox storage and set this
+# to e.g. "local:iso/SERVER_EVAL_x64FRE_en-us.iso". Microsoft's direct eval URLs
+# rotate and require accepting a EULA, so an uploaded ISO is the reliable path.
+# When set, it takes precedence over win_iso_url.
+variable "win_iso_file" {
+  type    = string
+  default = ""
+}
 variable "win_iso_checksum" {
   type    = string
   default = "sha256:ef7312733a9f5d7d351c3f8d29c716f0eba29f4d4ea0254bddc40e879c0b5d49"
@@ -32,7 +41,7 @@ variable "virtio_iso_url" {
 }
 variable "virtio_iso_checksum" {
   type    = string
-  default = "sha256:3e7a91afc8a9e76c4b4a6c28e0e3e34b0db6e27f0fe4a52add1f07827d5c5bc7"
+  default = "none"
 }
 
 source "proxmox-iso" "win10" {
@@ -51,8 +60,9 @@ source "proxmox-iso" "win10" {
   cpu_type = "host"
   qemu_agent = true
 
-  iso_url          = var.win_iso_url
-  iso_checksum     = var.win_iso_checksum
+  iso_file     = var.win_iso_file != "" ? var.win_iso_file : null
+  iso_url      = var.win_iso_file != "" ? null : var.win_iso_url
+  iso_checksum = var.win_iso_file != "" ? null : var.win_iso_checksum
   iso_storage_pool = var.iso_storage
   unmount_iso      = true
 

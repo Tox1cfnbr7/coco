@@ -13,8 +13,10 @@
 #     bash build-templates.sh --template dc02-ca
 #     bash build-templates.sh --template siem
 #
-#   After building, note VMIDs and update TEMPLATES in
-#   web/backend/services/vm_config.py
+#   Template VMIDs are FIXED in each .pkr.hcl and already match
+#   web/backend/services/vm_config.py — no manual edit needed after a build.
+#
+#   Windows ISOs: set WIN_ISO_FILE=local:iso/<file>.iso to use a staged ISO.
 # ============================================================
 set -Eeuo pipefail
 
@@ -121,6 +123,25 @@ build_template() {
   # Write PID file before build starts
   echo $$ > "$pid_file"
 
+  # Optional ISO overrides (env). For Windows, staging an ISO in Proxmox and
+  # setting WIN_ISO_FILE=local:iso/<file>.iso is the reliable method.
+  local extra_vars=()
+  [[ -n "${WIN_ISO_FILE:-}"     ]] && extra_vars+=(-var "win_iso_file=${WIN_ISO_FILE}")
+  [[ -n "${WIN_ISO_URL:-}"      ]] && extra_vars+=(-var "win_iso_url=${WIN_ISO_URL}")
+  [[ -n "${WIN_ISO_CHECKSUM:-}" ]] && extra_vars+=(-var "win_iso_checksum=${WIN_ISO_CHECKSUM}")
+  [[ -n "${ISO_URL:-}"          ]] && extra_vars+=(-var "iso_url=${ISO_URL}")
+  [[ -n "${ISO_CHECKSUM:-}"     ]] && extra_vars+=(-var "iso_checksum=${ISO_CHECKSUM}")
+
+  case "$key" in
+    win2022|win10|dc02-ca)
+      if [[ -z "${WIN_ISO_FILE:-}" ]]; then
+        warn "Windows template '$key': no WIN_ISO_FILE set — Packer will try the"
+        warn "Microsoft eval URL, which may rotate/expire. If the download fails,"
+        warn "upload the eval ISO to Proxmox (Datacenter > Storage > ISO Images)"
+        warn "and re-run:  WIN_ISO_FILE=local:iso/<file>.iso bash build-templates.sh --template $key"
+      fi ;;
+  esac
+
   PACKER_LOG=1 packer build \
     -var "proxmox_url=${PROXMOX_URL}" \
     -var "proxmox_user=${PROXMOX_USER}" \
@@ -128,6 +149,7 @@ build_template() {
     -var "proxmox_node=${PROXMOX_NODE}" \
     -var "proxmox_storage=${PROXMOX_STORAGE}" \
     -var "iso_storage=${ISO_STORAGE}" \
+    "${extra_vars[@]}" \
     -on-error=cleanup \
     . 2>&1 | tee -a "$log" | tee -a "$LOG_FILE"
 
@@ -141,7 +163,7 @@ build_template() {
     local vmid
     vmid=$(grep -oP 'vmid: \K[0-9]+' "$log" 2>/dev/null | tail -1 || \
            grep -oP '"vmid":\K[0-9]+' "$log" 2>/dev/null | tail -1 || echo "?")
-    [[ "$vmid" != "?" ]] && success "VMID: $vmid  →  update vm_config.py TEMPLATES['${key}'] = ${vmid}"
+    [[ "$vmid" != "?" ]] && success "VMID: $vmid (fixed in the template; already matches vm_config.py)"
   else
     warn "Build failed for '${label}' (exit $rc). Check: $log"
     return $rc
@@ -153,7 +175,8 @@ print_vmids() {
   info "Current templates on Proxmox:"
   qm list 2>/dev/null | grep -E "coco-tpl|VMID" || true
   echo ""
-  info "Update TEMPLATES in web/backend/services/vm_config.py with the VMID numbers above."
+  info "Template VMIDs are fixed (kali=9000 win2022=9001 dc02-ca=9002 debian12=9003 win10=9005 siem=9006)"
+  info "and already match web/backend/services/vm_config.py — no manual edit needed."
 }
 
 # ── Menu ────────────────────────────────────────────────────

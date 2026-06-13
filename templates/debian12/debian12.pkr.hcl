@@ -17,6 +17,19 @@ variable "iso_storage"      { type = string; default = "local" }
 variable "vm_id"   { type = string; default = "9003" }
 variable "vm_name" { type = string; default = "coco-tpl-debian12" }
 
+# Debian 12 netinst. We point at the permanent /archive/ path (the /current/
+# symlink moves with every point release, which breaks pinned filenames).
+# The "file:" checksum auto-resolves from SHA256SUMS, so bumping the version
+# only requires changing iso_url. Override:  -var "iso_url=..."
+variable "iso_url" {
+  type    = string
+  default = "https://cdimage.debian.org/cdimage/archive/12.11.0/amd64/iso-cd/debian-12.11.0-amd64-netinst.iso"
+}
+variable "iso_checksum" {
+  type    = string
+  default = "file:https://cdimage.debian.org/cdimage/archive/12.11.0/amd64/iso-cd/SHA256SUMS"
+}
+
 source "proxmox-iso" "debian12" {
   proxmox_url              = var.proxmox_url
   username                 = var.proxmox_user
@@ -34,8 +47,8 @@ source "proxmox-iso" "debian12" {
   qemu_agent = true
 
   # Debian 12 netinst — small ISO, rest downloaded during install
-  iso_url      = "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-12.5.0-amd64-netinst.iso"
-  iso_checksum = "sha256:013f5b44670d81280b5b1bc02455842b250df3f0c5f8fd0626b097f9ca22be3f"
+  iso_url      = var.iso_url
+  iso_checksum = var.iso_checksum
   iso_storage_pool = var.iso_storage
   unmount_iso  = true
 

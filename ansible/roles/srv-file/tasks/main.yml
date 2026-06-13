@@ -1,0 +1,24 @@
+---
+# roles/srv-file/tasks/main.yml
+# ADVANCED / best-effort. Turns a Windows host into a simple file server and
+# creates a share (target for SMB vulns). Uses the win2022 template.
+
+- name: "[file] Install File Server role"
+  ansible.windows.win_feature:
+    name: FS-FileServer
+    include_management_tools: true
+    state: present
+  ignore_errors: true
+
+- name: "[file] Create share directory"
+  ansible.windows.win_file:
+    path: 'C:\Shares\Public'
+    state: directory
+  ignore_errors: true
+
+- name: "[file] Publish SMB share"
+  ansible.windows.win_share:
+    name: Public
+    path: 'C:\Shares\Public'
+    read: Everyone
+  ignore_errors: true

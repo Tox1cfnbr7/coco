@@ -1,0 +1,11 @@
+---
+# Ansible Galaxy collections used by the deploy-session playbook.
+# Install with:  ansible-galaxy collection install -r ansible/requirements.yml
+# The Linux game path needs none of these; they are only required for the
+# Windows / Active Directory roles (dc-primary, dc-mssql, srv-file, sysmon, ...).
+collections:
+  - name: ansible.posix
+  - name: community.general
+  - name: ansible.windows
+  - name: community.windows
+  - name: microsoft.ad

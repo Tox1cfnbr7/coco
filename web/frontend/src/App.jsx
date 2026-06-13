@@ -3,8 +3,6 @@ import useAuthStore from './store/auth'
 import Login        from './pages/auth/Login'
 import Register     from './pages/auth/Register'
 import Dashboard    from './pages/Dashboard'
-import Games        from './pages/game/Games'
-import GameDetail   from './pages/game/GameDetail'
 import Terminal     from './pages/game/Terminal'
 import VMs          from './pages/game/VMs'
 import Admin        from './pages/admin/Admin'
@@ -26,8 +24,6 @@ export default function App() {
         <Route path="/register" element={<Register />} />
 
         <Route path="/dashboard"   element={<Guard><Dashboard /></Guard>} />
-        <Route path="/games"       element={<Guard><Games /></Guard>} />
-        <Route path="/games/:id"   element={<Guard><GameDetail /></Guard>} />
         <Route path="/terminal"    element={<Guard><Terminal /></Guard>} />
         <Route path="/vms"         element={<Guard><VMs /></Guard>} />
 

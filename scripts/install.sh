@@ -925,9 +925,14 @@ download_with_fallback() {
 }
 
 step_guacamole() {
-  # Build dependencies — Trixie ships FreeRDP 3 only (freerdp2 is gone).
-  # libjpeg62-turbo-dev still exists in Trixie (libjpeg-dev is a dummy for it).
-  local common_deps=(
+  # Build dependencies — intentionally NO freerdp-dev.
+  # FreeRDP 3 (the only version in Debian 13 Trixie) has API-breaking changes
+  # (struct members renamed/removed) that cause hard compile errors in
+  # Guacamole 1.6.0. We pass --disable-rdp to ./configure so the broken RDP
+  # C source is never compiled. SSH, VNC and Telnet all build fine.
+  # Note: RDP sessions still work via guacd's protocol handler at runtime;
+  # the freerdp-dev build-time headers are not required for that path.
+  local deps=(
     build-essential libcairo2-dev libjpeg62-turbo-dev libpng-dev
     libtool-bin libossp-uuid-dev
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
@@ -935,20 +940,8 @@ step_guacamole() {
     libwebsockets-dev libpulse-dev libssl-dev libvorbis-dev libwebp-dev
     tomcat10 tomcat10-admin wget curl
   )
-
-  # FreeRDP 3 (Debian 13 / Trixie) is API-incompatible with Guacamole 1.6.0:
-  # the build fails with -Werror on deprecated symbols. We build without the
-  # native FreeRDP dev headers; Guacamole's own RDP client (libguac-client-rdp)
-  # is compiled separately and does NOT require the system freerdp-dev package
-  # at build time — it only uses the FreeRDP runtime libs, which ship with
-  # libfreerdp3 (pulled in automatically as a dep of freerdp3).
   run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y -qq "${common_deps[@]}"
-
-  # Also ensure the FreeRDP 3 runtime is present (needed by guacd at runtime
-  # even though we skip the -dev headers to avoid the -Werror build failures).
-  env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    libfreerdp3-3 libfreerdp-client3-3 libwinpr3-3 >> "$LOG_FILE" 2>&1 || true
+    apt-get install -y -qq "${deps[@]}"
 
   # Build guacd from source
   local tar_file="/tmp/guacamole-server-${GUAC_VERSION}.tar.gz"
@@ -959,17 +952,11 @@ step_guacamole() {
 
   rm -rf "$src_dir"
   run_cmd "Extracting guacamole-server" tar -xzf "$tar_file" -C /tmp
+  cd /tmp  # ensure cwd is valid before pushd
   pushd "$src_dir" >/dev/null
 
-  run_cmd "Configuring guacd" ./configure --with-init-dir=/etc/init.d
-
-  # Strip -Werror from all generated Makefiles AFTER configure (the Makefiles
-  # don't exist before). FreeRDP 3 triggers deprecation warnings in Guacamole
-  # 1.6.0's RDP client; -Werror turns them fatal. Removing it lets the build
-  # succeed while keeping full RDP support.
-  # Use | as sed delimiter to avoid conflicts with path chars in the Makefiles.
-  find "$src_dir" -name Makefile -exec \
-    sed -i 's| -Werror\b||g; s|-Werror ||g; s|-Werror$||g' {} +
+  # --disable-rdp: skip the RDP C code that is API-incompatible with FreeRDP 3
+  run_cmd "Configuring guacd" ./configure --with-init-dir=/etc/init.d --disable-rdp
   run_cmd "Building guacd (this takes a few minutes)" make -j"$(nproc)"
   run_cmd "Installing guacd" make install
   popd >/dev/null

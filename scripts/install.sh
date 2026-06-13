@@ -961,10 +961,15 @@ step_guacamole() {
   run_cmd "Extracting guacamole-server" tar -xzf "$tar_file" -C /tmp
   pushd "$src_dir" >/dev/null
 
-  # --enable-allow-freerdp-snapshots is NOT used here: we deliberately skip
-  # the freerdp-dev headers (see above) to avoid -Werror build failures with
-  # FreeRDP 3. Guacamole's RDP support works via its own bundled client code.
   run_cmd "Configuring guacd" ./configure --with-init-dir=/etc/init.d
+
+  # Strip -Werror from all generated Makefiles AFTER configure (the Makefiles
+  # don't exist before). FreeRDP 3 triggers deprecation warnings in Guacamole
+  # 1.6.0's RDP client; -Werror turns them fatal. Removing it lets the build
+  # succeed while keeping full RDP support.
+  # Use | as sed delimiter to avoid conflicts with path chars in the Makefiles.
+  find "$src_dir" -name Makefile -exec \
+    sed -i 's| -Werror\b||g; s|-Werror ||g; s|-Werror$||g' {} +
   run_cmd "Building guacd (this takes a few minutes)" make -j"$(nproc)"
   run_cmd "Installing guacd" make install
   popd >/dev/null

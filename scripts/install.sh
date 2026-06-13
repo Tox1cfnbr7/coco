@@ -936,16 +936,19 @@ step_guacamole() {
     tomcat10 tomcat10-admin wget curl
   )
 
-  # Try freerdp3-dev first (Debian 13 / Trixie); fall back to freerdp2-dev
-  # (Debian 12 / Bookworm) so the installer also works on Bookworm hosts.
-  local freerdp_pkg="freerdp3-dev"
-  if ! apt-cache show freerdp3-dev >/dev/null 2>&1; then
-    warn "freerdp3-dev not found — falling back to freerdp2-dev"
-    freerdp_pkg="freerdp2-dev"
-  fi
-
+  # FreeRDP 3 (Debian 13 / Trixie) is API-incompatible with Guacamole 1.6.0:
+  # the build fails with -Werror on deprecated symbols. We build without the
+  # native FreeRDP dev headers; Guacamole's own RDP client (libguac-client-rdp)
+  # is compiled separately and does NOT require the system freerdp-dev package
+  # at build time — it only uses the FreeRDP runtime libs, which ship with
+  # libfreerdp3 (pulled in automatically as a dep of freerdp3).
   run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y -qq "${common_deps[@]}" "$freerdp_pkg"
+    apt-get install -y -qq "${common_deps[@]}"
+
+  # Also ensure the FreeRDP 3 runtime is present (needed by guacd at runtime
+  # even though we skip the -dev headers to avoid the -Werror build failures).
+  env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    libfreerdp3-3 libfreerdp-client3-3 libwinpr3-3 >> "$LOG_FILE" 2>&1 || true
 
   # Build guacd from source
   local tar_file="/tmp/guacamole-server-${GUAC_VERSION}.tar.gz"
@@ -958,12 +961,10 @@ step_guacamole() {
   run_cmd "Extracting guacamole-server" tar -xzf "$tar_file" -C /tmp
   pushd "$src_dir" >/dev/null
 
-  # --enable-allow-freerdp-snapshots is required when building against FreeRDP 3
-  # (which reports itself as a "snapshot" version to older configure checks).
-  local configure_flags="--with-init-dir=/etc/init.d"
-  [[ "$freerdp_pkg" == "freerdp3-dev" ]] && configure_flags+=" --enable-allow-freerdp-snapshots"
-
-  run_cmd "Configuring guacd" ./configure $configure_flags
+  # --enable-allow-freerdp-snapshots is NOT used here: we deliberately skip
+  # the freerdp-dev headers (see above) to avoid -Werror build failures with
+  # FreeRDP 3. Guacamole's RDP support works via its own bundled client code.
+  run_cmd "Configuring guacd" ./configure --with-init-dir=/etc/init.d
   run_cmd "Building guacd (this takes a few minutes)" make -j"$(nproc)"
   run_cmd "Installing guacd" make install
   popd >/dev/null

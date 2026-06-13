@@ -925,26 +925,27 @@ download_with_fallback() {
 }
 
 step_guacamole() {
-  # Build dependencies
+  # Build dependencies — Trixie ships FreeRDP 3 only (freerdp2 is gone).
+  # libjpeg62-turbo-dev still exists in Trixie (libjpeg-dev is a dummy for it).
   local common_deps=(
-    build-essential libcairo2-dev libpng-dev libtool-bin libossp-uuid-dev
+    build-essential libcairo2-dev libjpeg62-turbo-dev libpng-dev
+    libtool-bin libossp-uuid-dev
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
     libpango1.0-dev libssh2-1-dev libtelnet-dev libvncserver-dev
     libwebsockets-dev libpulse-dev libssl-dev libvorbis-dev libwebp-dev
     tomcat10 tomcat10-admin wget curl
   )
-  set +e
-  env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    "${common_deps[@]}" libjpeg62-turbo-dev freerdp2-dev >> "$LOG_FILE" 2>&1
-  local rc=$?
-  set -e
-  if [[ $rc -ne 0 ]]; then
-    warn "freerdp2 not available — trying freerdp3"
-    run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive \
-      apt-get install -y -qq "${common_deps[@]}" libjpeg-dev freerdp3-dev
-  else
-    success "Guacamole build dependencies installed"
+
+  # Try freerdp3-dev first (Debian 13 / Trixie); fall back to freerdp2-dev
+  # (Debian 12 / Bookworm) so the installer also works on Bookworm hosts.
+  local freerdp_pkg="freerdp3-dev"
+  if ! apt-cache show freerdp3-dev >/dev/null 2>&1; then
+    warn "freerdp3-dev not found — falling back to freerdp2-dev"
+    freerdp_pkg="freerdp2-dev"
   fi
+
+  run_cmd "Installing Guacamole build dependencies" env DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y -qq "${common_deps[@]}" "$freerdp_pkg"
 
   # Build guacd from source
   local tar_file="/tmp/guacamole-server-${GUAC_VERSION}.tar.gz"
@@ -956,7 +957,13 @@ step_guacamole() {
   rm -rf "$src_dir"
   run_cmd "Extracting guacamole-server" tar -xzf "$tar_file" -C /tmp
   pushd "$src_dir" >/dev/null
-  run_cmd "Configuring guacd" ./configure --with-init-dir=/etc/init.d
+
+  # --enable-allow-freerdp-snapshots is required when building against FreeRDP 3
+  # (which reports itself as a "snapshot" version to older configure checks).
+  local configure_flags="--with-init-dir=/etc/init.d"
+  [[ "$freerdp_pkg" == "freerdp3-dev" ]] && configure_flags+=" --enable-allow-freerdp-snapshots"
+
+  run_cmd "Configuring guacd" ./configure $configure_flags
   run_cmd "Building guacd (this takes a few minutes)" make -j"$(nproc)"
   run_cmd "Installing guacd" make install
   popd >/dev/null

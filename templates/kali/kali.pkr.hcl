@@ -133,28 +133,44 @@ build {
       "apt-get update -qq",
       "apt-get upgrade -y -qq",
 
-      # Core attacker tools (kali-tools-top10 covers most things)
-      "apt-get install -y -qq kali-tools-top10",
-      "apt-get install -y -qq kali-tools-windows-resources",
+      # Core attacker tools (kali-tools-top10 covers most things).
+      # NOTE: every install below is best-effort (|| true). Kali is a rolling
+      # release — package names occasionally change — and a single missing
+      # or renamed package must never discard the whole VM after a multi-
+      # minute install. Failures are collected and reported at the end so
+      # they're visible in the Packer log without aborting the build.
+      "FAILED_PKGS=''",
+      "install_pkg() { apt-get install -y -qq \"$1\" || { echo \"[coco] FAILED: $1\"; FAILED_PKGS=\"$FAILED_PKGS $1\"; }; }",
+
+      "install_pkg kali-tools-top10",
+      "install_pkg kali-tools-windows-resources",
 
       # Additional tools commonly used in AD attacks
-      "apt-get install -y -qq impacket-scripts python3-impacket",
-      "apt-get install -y -qq bloodhound neo4j",
-      "apt-get install -y -qq evil-winrm",
-      "apt-get install -y -qq crackmapexec",
-      "apt-get install -y -qq ldapdomaindump",
-      "apt-get install -y -qq responder",
-      "apt-get install -y -qq ffuf gobuster feroxbuster",
-      "apt-get install -y -qq john hashcat",
-      "apt-get install -y -qq smbclient smbmap",
-      "apt-get install -y -qq enum4linux-ng",
-      "apt-get install -y -qq certipy-ad || pip3 install certipy-ad --quiet",
+      "install_pkg impacket-scripts",
+      "install_pkg python3-impacket",
+      "install_pkg bloodhound",
+      "install_pkg neo4j",
+      "install_pkg evil-winrm",
+      "install_pkg crackmapexec",
+      "install_pkg python3-ldapdomaindump",
+      "install_pkg responder",
+      "install_pkg ffuf",
+      "install_pkg gobuster",
+      "install_pkg feroxbuster",
+      "install_pkg john",
+      "install_pkg hashcat",
+      "install_pkg smbclient",
+      "install_pkg smbmap",
+      "install_pkg enum4linux-ng",
+      "apt-get install -y -qq certipy-ad || pip3 install certipy-ad --quiet --break-system-packages || echo '[coco] FAILED: certipy-ad'",
+
+      "if [ -n \"$FAILED_PKGS\" ]; then echo \"[coco] Packages that failed to install (non-fatal):$FAILED_PKGS\"; fi",
 
       # Install kerbrute
       "curl -sL https://github.com/ropnop/kerbrute/releases/latest/download/kerbrute_linux_amd64 -o /usr/local/bin/kerbrute && chmod +x /usr/local/bin/kerbrute",
 
       # Python extras
-      "pip3 install --quiet requests httpx netifaces",
+      "pip3 install --quiet --break-system-packages requests httpx netifaces || true",
 
       # Cloud-init for Proxmox cloning
       "apt-get install -y -qq cloud-init qemu-guest-agent",

@@ -135,7 +135,7 @@ build {
 
       # DVWA — Damn Vulnerable Web Application
       "git clone --depth 1 https://github.com/digininja/DVWA /var/www/html/dvwa 2>/dev/null || true",
-      "if [[ -d /var/www/html/dvwa ]]; then",
+      "if [ -d /var/www/html/dvwa ]; then",
       "  cp /var/www/html/dvwa/config/config.inc.php.dist /var/www/html/dvwa/config/config.inc.php",
       "  sed -i \"s/'db_password' => 'p@ssw0rd'/'db_password' => 'dvwa'/\" /var/www/html/dvwa/config/config.inc.php",
       "  sed -i \"s/low/low/g\" /var/www/html/dvwa/config/config.inc.php",

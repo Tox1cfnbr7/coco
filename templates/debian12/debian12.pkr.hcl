@@ -24,6 +24,10 @@ variable "proxmox_storage" {
   type = string
   default = "local-lvm"
 }
+variable "network_bridge" {
+  type    = string
+  default = "vmbr0"
+}
 variable "iso_storage" {
   type = string
   default = "local"
@@ -85,7 +89,7 @@ source "proxmox-iso" "debian12" {
 
   network_adapters {
     model    = "virtio"
-    bridge   = "vmbr0"
+    bridge   = var.network_bridge
     firewall = false
   }
 

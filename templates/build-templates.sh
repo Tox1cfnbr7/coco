@@ -65,8 +65,45 @@ PROXMOX_URL="${PROXMOX_URL:-https://127.0.0.1:8006/api2/json}"
 PROXMOX_USER="${PROXMOX_USER:-root@pam}"
 PROXMOX_NODE="${PROXMOX_NODE:-$(hostname)}"
 PROXMOX_PASSWORD="${PROXMOX_PASSWORD:-${PVE_ROOT_PASSWORD:-}}"
-PROXMOX_STORAGE="${PROXMOX_STORAGE:-local-lvm}"
 ISO_STORAGE="${ISO_STORAGE:-local}"
+
+# Auto-detect a storage that actually supports VM disk images, instead of
+# hardcoding "local-lvm" (which doesn't exist on hosts that only have the
+# default directory-based "local" storage, e.g. single-disk homelab setups).
+# Respect PROXMOX_STORAGE if the caller already set it.
+if [[ -z "${PROXMOX_STORAGE:-}" ]]; then
+  if command -v pvesm >/dev/null 2>&1; then
+    # pvesm status -content=images  -> first column is the storage name
+    detected="$(pvesm status -content=images 2>/dev/null | awk 'NR>1 {print $1; exit}')"
+  fi
+  if [[ -n "${detected:-}" ]]; then
+    PROXMOX_STORAGE="$detected"
+    echo "[*] Auto-detected VM storage: $PROXMOX_STORAGE"
+  else
+    PROXMOX_STORAGE="local-lvm"
+    echo "[!] Could not auto-detect a VM-disk storage — defaulting to 'local-lvm'."
+    echo "    If this host doesn't have that storage, override with:"
+    echo "    PROXMOX_STORAGE=<name> bash build-templates.sh ..."
+  fi
+fi
+
+# Auto-detect a Linux bridge, instead of hardcoding "vmbr0" (which doesn't
+# exist on hosts where Proxmox was installed without auto-creating a bridge,
+# e.g. some nested/homelab setups where the NIC stayed unbridged).
+# Respect NETWORK_BRIDGE if the caller already set it.
+if [[ -z "${NETWORK_BRIDGE:-}" ]]; then
+  detected_bridge="$(ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | head -n1)"
+  if [[ -n "${detected_bridge:-}" ]]; then
+    NETWORK_BRIDGE="$detected_bridge"
+    echo "[*] Auto-detected network bridge: $NETWORK_BRIDGE"
+  else
+    NETWORK_BRIDGE="vmbr0"
+    echo "[!] Could not auto-detect a network bridge — defaulting to 'vmbr0'."
+    echo "    If this host doesn't have that bridge, create one (see"
+    echo "    Setup/docs/network.md) or override with:"
+    echo "    NETWORK_BRIDGE=<name> bash build-templates.sh ..."
+  fi
+fi
 
 # ── Args ────────────────────────────────────────────────────
 BUILD_ALL=0; TEMPLATE=""
@@ -149,6 +186,7 @@ build_template() {
     -var "proxmox_node=${PROXMOX_NODE}" \
     -var "proxmox_storage=${PROXMOX_STORAGE}" \
     -var "iso_storage=${ISO_STORAGE}" \
+    -var "network_bridge=${NETWORK_BRIDGE}" \
     "${extra_vars[@]}" \
     -on-error=cleanup \
     . 2>&1 | tee -a "$log" | tee -a "$LOG_FILE"
@@ -190,7 +228,7 @@ show_menu() {
   ╚═════╝  ╚═════╝  ╚═════╝  ╚═════╝
          Template Builder v2
 LOGO
-  printf '%b  Node: %s  |  Storage: %s%b\n\n' "$RESET$CYAN" "$PROXMOX_NODE" "$PROXMOX_STORAGE" "$RESET"
+  printf '%b  Node: %s  |  Storage: %s  |  Bridge: %s%b\n\n' "$RESET$CYAN" "$PROXMOX_NODE" "$PROXMOX_STORAGE" "$NETWORK_BRIDGE" "$RESET"
   echo "  Templates:"
   echo "    1) kali     — Kali Linux 2024 (Red Team)"
   echo "    2) debian12  — Debian 12 (Web / Linux Services)"

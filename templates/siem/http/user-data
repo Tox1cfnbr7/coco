@@ -15,9 +15,13 @@ autoinstall:
       name: direct
   identity:
     hostname: siem
-    username: root
-    password: "$6$rounds=4096$saltsalt$hashedpassword"
-    realname: COCO SIEM
+    # Subiquity's "identity" block is meant to create a normal sudo user, not
+    # root directly — setting username: root here is undefined/risky behavior.
+    # This creates a throwaway sudo user (password: coco2024, same as root);
+    # root SSH access itself is configured below via user-data.chpasswd +
+    # disable_root: false, which is the documented way to enable root login.
+    username: coco
+    password: "$6$v5ugUl7bL56XV6Gr$KCbyz65ztmAJtt5/eTIorByCP2BUyAHdGAnitKNdPKLfWbpochXytbciVbb3VTmXdsyxbzBNF6MJIPLDw5sx7/"
   ssh:
     install-server: yes
     allow-pw: yes

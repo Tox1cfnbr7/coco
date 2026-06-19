@@ -8,15 +8,36 @@ packer {
 }
 
 # ── Variables (set by build-templates.sh) ──────────────────
-variable "proxmox_url"      { type = string }
-variable "proxmox_user"     { type = string }
-variable "proxmox_password" { type = string; sensitive = true }
-variable "proxmox_node"     { type = string }
-variable "proxmox_storage"  { type = string; default = "local-lvm" }
-variable "iso_storage"      { type = string; default = "local" }
+variable "proxmox_url" {
+  type = string
+}
+variable "proxmox_user" {
+  type = string
+}
+variable "proxmox_password" {
+  type = string
+  sensitive = true
+}
+variable "proxmox_node" {
+  type = string
+}
+variable "proxmox_storage" {
+  type = string
+  default = "local-lvm"
+}
+variable "iso_storage" {
+  type = string
+  default = "local"
+}
 
-variable "vm_id"   { type = string; default = "9000" }
-variable "vm_name" { type = string; default = "coco-tpl-kali" }
+variable "vm_id" {
+  type = string
+  default = "9000"
+}
+variable "vm_name" {
+  type = string
+  default = "coco-tpl-kali"
+}
 
 # Kali ISO — overridable. The checksum uses Packer's self-validating "file:"
 # form so it never goes stale when Kali ships a new point release: Packer

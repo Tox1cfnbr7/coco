@@ -7,15 +7,36 @@ packer {
   }
 }
 
-variable "proxmox_url"      { type = string }
-variable "proxmox_user"     { type = string }
-variable "proxmox_password" { type = string; sensitive = true }
-variable "proxmox_node"     { type = string }
-variable "proxmox_storage"  { type = string; default = "local-lvm" }
-variable "iso_storage"      { type = string; default = "local" }
+variable "proxmox_url" {
+  type = string
+}
+variable "proxmox_user" {
+  type = string
+}
+variable "proxmox_password" {
+  type = string
+  sensitive = true
+}
+variable "proxmox_node" {
+  type = string
+}
+variable "proxmox_storage" {
+  type = string
+  default = "local-lvm"
+}
+variable "iso_storage" {
+  type = string
+  default = "local"
+}
 
-variable "vm_id"   { type = string; default = "9001" }
-variable "vm_name" { type = string; default = "coco-tpl-win2022" }
+variable "vm_id" {
+  type = string
+  default = "9001"
+}
+variable "vm_name" {
+  type = string
+  default = "coco-tpl-win2022"
+}
 
 # Windows Server 2022 Evaluation — free 180-day license, no key needed
 # Official Microsoft download

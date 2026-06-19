@@ -7,15 +7,36 @@ packer {
   }
 }
 
-variable "proxmox_url"      { type = string }
-variable "proxmox_user"     { type = string }
-variable "proxmox_password" { type = string; sensitive = true }
-variable "proxmox_node"     { type = string }
-variable "proxmox_storage"  { type = string; default = "local-lvm" }
-variable "iso_storage"      { type = string; default = "local" }
+variable "proxmox_url" {
+  type = string
+}
+variable "proxmox_user" {
+  type = string
+}
+variable "proxmox_password" {
+  type = string
+  sensitive = true
+}
+variable "proxmox_node" {
+  type = string
+}
+variable "proxmox_storage" {
+  type = string
+  default = "local-lvm"
+}
+variable "iso_storage" {
+  type = string
+  default = "local"
+}
 
-variable "vm_id"   { type = string; default = "9005" }
-variable "vm_name" { type = string; default = "coco-tpl-win10" }
+variable "vm_id" {
+  type = string
+  default = "9005"
+}
+variable "vm_name" {
+  type = string
+  default = "coco-tpl-win10"
+}
 
 # Windows 10 Enterprise Evaluation (free 90 days)
 variable "win_iso_url" {

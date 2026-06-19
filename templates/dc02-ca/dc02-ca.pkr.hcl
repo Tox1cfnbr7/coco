@@ -7,14 +7,35 @@ packer {
   }
 }
 
-variable "proxmox_url"      { type = string }
-variable "proxmox_user"     { type = string }
-variable "proxmox_password" { type = string; sensitive = true }
-variable "proxmox_node"     { type = string }
-variable "proxmox_storage"  { type = string; default = "local-lvm" }
-variable "iso_storage"      { type = string; default = "local" }
-variable "vm_id"            { type = string; default = "9002" }
-variable "vm_name"          { type = string; default = "coco-tpl-dc02-ca" }
+variable "proxmox_url" {
+  type = string
+}
+variable "proxmox_user" {
+  type = string
+}
+variable "proxmox_password" {
+  type = string
+  sensitive = true
+}
+variable "proxmox_node" {
+  type = string
+}
+variable "proxmox_storage" {
+  type = string
+  default = "local-lvm"
+}
+variable "iso_storage" {
+  type = string
+  default = "local"
+}
+variable "vm_id" {
+  type = string
+  default = "9002"
+}
+variable "vm_name" {
+  type = string
+  default = "coco-tpl-dc02-ca"
+}
 
 variable "win_iso_url" {
   default = "https://software-static.download.prss.microsoft.com/sg/download/888969d5-f34g-4e03-ac9d-1f9786c66749/SERVER_EVAL_x64FRE_en-us.iso"

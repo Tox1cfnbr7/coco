@@ -7,14 +7,35 @@ packer {
   }
 }
 
-variable "proxmox_url"      { type = string }
-variable "proxmox_user"     { type = string }
-variable "proxmox_password" { type = string; sensitive = true }
-variable "proxmox_node"     { type = string }
-variable "proxmox_storage"  { type = string; default = "local-lvm" }
-variable "iso_storage"      { type = string; default = "local" }
-variable "vm_id"            { type = string; default = "9006" }
-variable "vm_name"          { type = string; default = "coco-tpl-siem" }
+variable "proxmox_url" {
+  type = string
+}
+variable "proxmox_user" {
+  type = string
+}
+variable "proxmox_password" {
+  type = string
+  sensitive = true
+}
+variable "proxmox_node" {
+  type = string
+}
+variable "proxmox_storage" {
+  type = string
+  default = "local-lvm"
+}
+variable "iso_storage" {
+  type = string
+  default = "local"
+}
+variable "vm_id" {
+  type = string
+  default = "9006"
+}
+variable "vm_name" {
+  type = string
+  default = "coco-tpl-siem"
+}
 
 # Ubuntu 22.04 live-server. releases.ubuntu.com/22.04 always holds the latest
 # point release; the "file:" checksum auto-resolves so a new point release does
